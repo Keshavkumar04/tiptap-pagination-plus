@@ -137,7 +137,7 @@ export const PaginationPlus = Extension.create<PaginationPlusOptions>({
       .rm-with-pagination table tbody > tr{
         display: table-row !important;
       }
-      .rm-with-pagination *:has(br.ProseMirror-trailingBreak:only-child) {
+      .rm-with-pagination *:has(>br.ProseMirror-trailingBreak:only-child) {
         display: table;
         width: 100%;
       }
