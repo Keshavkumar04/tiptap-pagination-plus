@@ -1,8 +1,12 @@
-import { Extension } from "@tiptap/core";
-import { EditorState, Plugin, PluginKey } from "@tiptap/pm/state";
+import { Editor, Extension } from "@tiptap/core";
+import { EditorState, Plugin, PluginKey} from "@tiptap/pm/state";
+import { ReplaceStep, ReplaceAroundStep, AddMarkStep, RemoveMarkStep, RemoveNodeMarkStep, AttrStep } from "@tiptap/pm/transform";
 import { Decoration, DecorationSet, EditorView } from "@tiptap/pm/view";
-import { updateCssVariables } from "./utils";
+import { deepEqualIterative, footerClickEvent, getCustomPages, getFooter, getFooterHeight, getHeader, getHeaderHeight, getHeight, headerClickEvent, updateCssVariables } from "./utils";
 import { PageSize } from "./constants";
+import { HeaderOptions, FooterOptions, PageNumber, HeaderHeightMap, FooterHeightMap, HeaderClickEvent, FooterClickEvent } from "./types";
+import type { Node as PMNode } from 'prosemirror-model';
+
 
 export interface PaginationPlusOptions {
   pageHeight: number;
@@ -14,6 +18,8 @@ export interface PaginationPlusOptions {
   footerLeft: string;
   headerRight: string;
   headerLeft: string;
+  customHeader: Record<PageNumber, HeaderOptions>;
+  customFooter: Record<PageNumber, FooterOptions>;
   marginTop: number;
   marginBottom: number;
   marginLeft: number;
@@ -21,8 +27,16 @@ export interface PaginationPlusOptions {
   contentMarginTop: number;
   contentMarginBottom: number;
   pageGapBorderColor: string;
+  onHeaderClick?: HeaderClickEvent
+  onFooterClick?: FooterClickEvent
+}
+
+export interface PaginationPlusStorage extends PaginationPlusOptions {
+  headerHeight: HeaderHeightMap;
+  footerHeight: FooterHeightMap;
 }
 const page_count_meta_key = "PAGE_COUNT_META_KEY";
+const footer_height_meta_key = "FOOTER_HEIGHT_META_KEY";
 
 declare module "@tiptap/core" {
   interface Commands<ReturnType> {
@@ -34,15 +48,34 @@ declare module "@tiptap/core" {
       updatePageGap: (gap: number) => ReturnType;
       updateMargins: (margins: { top: number, bottom: number, left: number, right: number }) => ReturnType;
       updateContentMargins: (margins: { top: number, bottom: number }) => ReturnType;
-      updateHeaderContent: (left: string, right: string) => ReturnType;
-      updateFooterContent: (left: string, right: string) => ReturnType;
+      updateHeaderContent: (left: string, right: string, pageNumber?: PageNumber) => ReturnType;
+      updateFooterContent: (left: string, right: string, pageNumber?: PageNumber) => ReturnType;
     };
   }
   interface Storage {
-    PaginationPlus: PaginationPlusOptions
+    PaginationPlus: PaginationPlusStorage
   }
 }
 
+const key = new PluginKey<DecorationSet>('brDecoration');
+
+function buildDecorations(doc: PMNode): DecorationSet {
+  const decorations: Decoration[] = [];
+
+  doc.descendants((node, pos) => {
+    if (node.type.name === 'hardBreak') {
+      const afterPos = pos + 1;
+      const widget = Decoration.widget(afterPos, () => {
+        const el = document.createElement('span');
+        el.classList.add('rm-br-decoration');
+        return el;
+      });
+      decorations.push(widget);
+    }
+  });
+  return DecorationSet.create(doc, decorations);
+
+}
 const defaultOptions: PaginationPlusOptions = {
   pageHeight: 800,
   pageWidth: 789,
@@ -60,15 +93,39 @@ const defaultOptions: PaginationPlusOptions = {
   contentMarginTop: 10,
   contentMarginBottom: 10,
   pageGapBorderColor: "#e5e5e5",
+  customHeader: {},
+  customFooter: {},
 }
 
-export const PaginationPlus = Extension.create<PaginationPlusOptions>({
+const refreshPage = (targetNode: HTMLElement) => {
+  const paginationElement = targetNode.querySelector(
+    "[data-rm-pagination]"
+  );
+  if (paginationElement) {
+    const lastPageBreak = paginationElement.lastElementChild?.querySelector(
+      ".breaker"
+    ) as HTMLElement;
+    if (lastPageBreak) {
+      const minHeight =
+        lastPageBreak.offsetTop + lastPageBreak.offsetHeight;
+      targetNode.style.minHeight = `calc(${minHeight}px + 2px)`;
+    }
+  }
+};
+
+const paginationKey = new PluginKey("pagination");
+
+export const PaginationPlus = Extension.create<PaginationPlusOptions, PaginationPlusStorage>({
   name: "PaginationPlus",
   addOptions() {
     return defaultOptions;
   },
   addStorage() {
-    return defaultOptions;
+    return {
+      ...defaultOptions,
+      headerHeight: new Map(),
+      footerHeight: new Map(),
+    };
   },
   onCreate() {
     const targetNode = this.editor.view.dom;
@@ -77,8 +134,6 @@ export const PaginationPlus = Extension.create<PaginationPlusOptions>({
     targetNode.style.paddingLeft = `var(--rm-margin-left)`;
     targetNode.style.paddingRight = `var(--rm-margin-right)`;
     targetNode.style.width = `var(--rm-page-width)`;
-
-    const config = { attributes: true };
 
     updateCssVariables(targetNode, this.options);
 
@@ -91,7 +146,8 @@ export const PaginationPlus = Extension.create<PaginationPlusOptions>({
         border-bottom: 1px solid;
         border-color: var(--rm-page-gap-border-color);
       }
-      .rm-with-pagination {
+      .rm-with-pagination,
+      .rm-with-pagination .rm-first-page-header {
         counter-reset: page-number page-number-plus 1;
       }
       .rm-with-pagination .image-plus-wrapper,
@@ -106,9 +162,7 @@ export const PaginationPlus = Extension.create<PaginationPlusOptions>({
       .rm-with-pagination .rm-page-break {
         counter-increment: page-number page-number-plus;
       }
-      .rm-with-pagination .rm-page-footer {
-        margin-bottom: var(--rm-margin-bottom);
-      }
+      
       .rm-with-pagination .rm-page-break:last-child .rm-pagination-gap {
         display: none;
       }
@@ -146,7 +200,7 @@ export const PaginationPlus = Extension.create<PaginationPlusOptions>({
         width: 100%;
       }
       .rm-with-pagination .table-row-group {
-        max-height: var(--rm-page-content-height);
+        max-height: var(--rm-max-content-child-height);
         overflow-y: auto;
         width: 100%;
       }
@@ -167,101 +221,77 @@ export const PaginationPlus = Extension.create<PaginationPlusOptions>({
         float: right;
         margin-right: var(--rm-margin-right);
       }
+      .rm-with-pagination .rm-first-page-header .rm-page-header-right{
+        margin-right: 0px !important;
+      }
+      .rm-with-pagination .rm-first-page-header .rm-page-header-left{
+        margin-left: 0px !important;
+      }
       .rm-with-pagination .rm-page-number::before {
         content: counter(page-number);
       }
       .rm-with-pagination .rm-page-number-plus::before {
         content: counter(page-number-plus);
       }
-      .rm-with-pagination .rm-first-page-header,
       .rm-with-pagination .rm-page-header,
       .rm-with-pagination .rm-page-footer{
         width: 100%;
       }
-      .rm-with-pagination .rm-page-header,
-      .rm-with-pagination .rm-first-page-header{
-        margin-bottom: var(--rm-content-margin-top) !important;
-        margin-top: var(--rm-margin-top) !important;
+      .rm-with-pagination .rm-page-header{
+        padding-bottom: var(--rm-content-margin-top) !important;
+        padding-top: var(--rm-margin-top) !important;
         display: inline-flex;
         justify-content: space-between;
-        max-height: calc(calc(var(--rm-page-height) * 0.35) - var(--rm-margin-top) - var(--rm-content-margin-top));
+        max-height: calc(calc(var(--rm-page-height) * 0.45) - var(--rm-margin-top) - var(--rm-content-margin-top));
         overflow-y: hidden;
       }
       .rm-with-pagination .rm-page-footer{
-        margin-top: var(--rm-content-margin-bottom) !important;
-        margin-bottom: var(--rm-margin-bottom) !important;
+        padding-top: var(--rm-content-margin-bottom) !important;
+        padding-bottom: var(--rm-margin-bottom) !important;
         display: inline-flex;
         justify-content: space-between;
-        max-height: calc(calc(var(--rm-page-height) * 0.35) - var(--rm-content-margin-bottom) - var(--rm-margin-bottom));
+        max-height: calc(calc(var(--rm-page-height) * 0.45) - var(--rm-content-margin-bottom) - var(--rm-margin-bottom));
         overflow-y: hidden;
       }
     `;
     document.head.appendChild(style);
-
-    const refreshPage = (targetNode: HTMLElement) => {
-      const paginationElement = targetNode.querySelector(
-        "[data-rm-pagination]"
-      );
-      if (paginationElement) {
-        const lastPageBreak = paginationElement.lastElementChild?.querySelector(
-          ".breaker"
-        ) as HTMLElement;
-        if (lastPageBreak) {
-          const minHeight =
-            lastPageBreak.offsetTop + lastPageBreak.offsetHeight;
-          targetNode.style.minHeight = `${minHeight}px`;
-        }
-      }
-    };
-
-    const callback = (
-      mutationList: MutationRecord[]
-    ) => {
-      if (mutationList.length > 0 && mutationList[0].target) {
-        const _target = mutationList[0].target as HTMLElement;
-        if (_target.classList.contains("rm-with-pagination")) {
-          const currentPageCount = getExistingPageCount(this.editor.view);
-          const pageCount = calculatePageCount(this.editor.view, this.options);
-          const recalculatePageCount = needNewDecoration(this.editor.view, this.options, this.storage);
-          if (currentPageCount !== pageCount || recalculatePageCount) {
-            
-               const tr = this.editor.view.state.tr.setMeta(
-                 page_count_meta_key,
-                 Date.now()
-               );
-               this.editor.view.dispatch(tr);
-          }
-
-          refreshPage(_target);
-        }
-      }
-    };
-    const observer = new MutationObserver(callback);
-    observer.observe(targetNode, config);
     refreshPage(targetNode);
   },
   addProseMirrorPlugins() {
     const editor = this.editor;
     return [
       new Plugin({
-        key: new PluginKey("pagination"),
+        key: paginationKey,
 
         state: {
-          init:(_, state) => {
-            const widgetList = createDecoration(state, this.options);
-            this.storage = {...this.options};
-            return DecorationSet.create(state.doc, widgetList);
+          init: (_, state) => {
+            const widgetList = createDecoration(this.options, new Map(), new Map());
+            this.storage = { ...this.options, headerHeight: new Map(), footerHeight: new Map() };
+
+            return {
+              decorations : DecorationSet.create(state.doc, widgetList),
+            };
           },
-          apply:(tr, oldDeco, oldState, newState) => {
+          apply: (tr, oldDeco, oldState, newState) => {
             const pageCount = calculatePageCount(editor.view, this.options);
             const currentPageCount = getExistingPageCount(editor.view);
 
-            const recalculatePageCount = needNewDecoration(editor.view, this.options, this.storage);
-            console.log("Recalculate Page Count", recalculatePageCount);
+            const getNewDecoration = () => {
+              updateCssVariables(editor.view.dom, this.options);
+              let headerHeight = "headerHeight" in this.storage ? this.storage.headerHeight : new Map();
+              let footerHeight = "footerHeight" in this.storage ? this.storage.footerHeight : new Map();
+
+              const widgetList = createDecoration(this.options, headerHeight, footerHeight);
+              this.storage = { ...this.options, headerHeight, footerHeight };
+              return {
+                decorations : DecorationSet.create(newState.doc, [...widgetList]),
+                footerHeight
+              };
+            }
+
 
             if (
-              (pageCount > 1 ? pageCount : 1) !== currentPageCount || 
-              recalculatePageCount ||
+              (pageCount > 1 ? pageCount : 1) !== currentPageCount ||
               this.storage.pageBreakBackground !== this.options.pageBreakBackground ||
               this.storage.pageHeight !== this.options.pageHeight ||
               this.storage.pageWidth !== this.options.pageWidth ||
@@ -275,47 +305,140 @@ export const PaginationPlus = Extension.create<PaginationPlusOptions>({
               this.storage.headerLeft !== this.options.headerLeft ||
               this.storage.headerRight !== this.options.headerRight ||
               this.storage.footerLeft !== this.options.footerLeft ||
-              this.storage.footerRight !== this.options.footerRight
-            ) {              
-              const widgetList = createDecoration(newState, this.options);
-              this.storage = {...this.options};
-              newState.tr.setMeta(page_count_meta_key, Date.now())
-              return DecorationSet.create(newState.doc, [...widgetList]);
+              this.storage.footerRight !== this.options.footerRight ||
+              !deepEqualIterative(this.options.customHeader, this.storage.customHeader) ||
+              !deepEqualIterative(this.options.customFooter, this.storage.customFooter)
+            ) {
+              return getNewDecoration();
             }
+
             return oldDeco;
           },
+         
         },
 
         props: {
           decorations(state: EditorState) {
-            return this.getState(state) as DecorationSet;
+            return this.getState(state)?.decorations as DecorationSet;
           },
         },
+        view: (editorView: EditorView) => {
+          return {
+            update: (view : EditorView) => {
+                const pageCount = calculatePageCount(view, this.options);
+                const currentPageCount = getExistingPageCount(view);
+                
+                const triggerUpdate = (_footerHeight?: FooterHeightMap) => {
+                  requestAnimationFrame(() => {
+                    const tr = view.state.tr.setMeta(page_count_meta_key, { footerHeight: _footerHeight });
+                    view.dispatch(tr)
+                  })
+                }
+
+                if(currentPageCount !== pageCount) {
+                  triggerUpdate();
+                  return;
+                }
+
+                const headerHeight = getHeaderHeight(view.dom, getCustomPages(this.options.customHeader, {}), "content");
+                const footerHeight = getFooterHeight(view.dom, getCustomPages({}, this.options.customFooter), "content");
+
+                const footerHeightForCurrentPages = new Map<PageNumber, number>();
+                for(let i = 0; i <= pageCount; i++) {
+                  if(footerHeight.has(i)) {
+                    footerHeightForCurrentPages.set(i, footerHeight.get(i) || 0);
+                  }
+                }
+
+                const headerHeightForCurrentPages = new Map<PageNumber, number>();
+                for(let i = 0; i <= pageCount; i++) {
+                  if(headerHeight.has(i)) {
+                    headerHeightForCurrentPages.set(i, headerHeight.get(i) || 0);
+                  }
+                }
+
+
+                const pagesSetToCheck = new Set([1, ...footerHeightForCurrentPages.keys(), ...headerHeightForCurrentPages.keys()]);
+
+                let missingPageNumber : PageNumber | undefined = undefined;
+
+                for (let i = 1; i <= pageCount; i++) {
+                  if (!pagesSetToCheck.has(i)) {
+                    missingPageNumber = i;
+                    break;
+                  }
+                }
+
+                if(missingPageNumber) {
+                  pagesSetToCheck.add(missingPageNumber);
+                      
+                }
+
+
+                pagesSetToCheck.delete(0);
+                let pageContentHeightVariable: Record<string, string> = {};
+                let maxContentHeight: number | undefined = undefined;
+                for (const page of pagesSetToCheck) {
+                  
+                  const headerHeight = headerHeightForCurrentPages.has(page) ? headerHeightForCurrentPages.get(page) || 0 : headerHeightForCurrentPages.get(0) || 0;
+                  const footerHeight = footerHeightForCurrentPages.has(page) ? footerHeightForCurrentPages.get(page) || 0 : footerHeightForCurrentPages.get(0) || 0;
+                  const { _pageHeaderHeight, _pageHeight } = getHeight(this.options, headerHeight, footerHeight);
+                  
+                  const contentHeight = page === 1 ? _pageHeight + _pageHeaderHeight : _pageHeight;
+                  if(page === 1) {
+                    pageContentHeightVariable[`rm-page-content-first`] = `${contentHeight}px`;
+                  }
+                  if(page === missingPageNumber) {
+                      pageContentHeightVariable[`rm-page-content-general`] = `${contentHeight}px`;
+                  }else{
+                      pageContentHeightVariable[`rm-page-content-${page}`] = `${contentHeight}px`;
+                  }
+                  if(maxContentHeight === undefined || contentHeight < maxContentHeight) {
+                    maxContentHeight = contentHeight;
+                  }
+                }
+
+                if(maxContentHeight) {
+                  view.dom.style.setProperty(`--rm-max-content-child-height`, `${maxContentHeight - 10}px`);
+                }
+                Object.entries(pageContentHeightVariable).forEach(([key, value]) => {
+                  view.dom.style.setProperty(`--${key}`, value);
+                });
+                refreshPage(view.dom);
+
+                
+                return ;
+            }, 
+          }
+        }
       }),
-      new Plugin({
-        key: new PluginKey('brDecoration'),
+      new Plugin<DecorationSet>({
+        key,
+      
         state: {
-          init() { return DecorationSet.empty },
+          init(_, state) {
+            return buildDecorations(state.doc);
+          },
+      
           apply(tr, old) {
-            // Map decorations through document changes
-            return old.map(tr.mapping, tr.doc);
+            if(
+              tr.docChanged ||
+              tr.steps.some(step => step instanceof ReplaceStep) ||
+              tr.steps.some(step => step instanceof ReplaceAroundStep) ||
+              tr.steps.some(step => step instanceof AddMarkStep) ||
+              tr.steps.some(step => step instanceof RemoveMarkStep) ||
+              tr.steps.some(step => step instanceof RemoveNodeMarkStep) ||
+              tr.steps.some(step => step instanceof AttrStep)
+            ) {
+              return buildDecorations(tr.doc);
+            }
+            return old;
           }
         },
+      
         props: {
           decorations(state) {
-            const decorations: Decoration[] = [];
-            state.doc.descendants((node, pos) => {
-              if (node.type.name === 'hardBreak') {
-                const afterPos = pos + 1;
-                const widget = Decoration.widget(afterPos, () => {
-                  const el = document.createElement('span');
-                  el.classList.add('rm-br-decoration');
-                  return el;
-                });
-                decorations.push(widget);
-              }
-            });
-            return DecorationSet.create(state.doc, decorations);
+            return key.getState(state) ?? DecorationSet.empty;
           }
         }
       }),
@@ -360,14 +483,22 @@ export const PaginationPlus = Extension.create<PaginationPlusOptions>({
         this.options.contentMarginBottom = margins.bottom;
         return true;
       },
-      updateHeaderContent: (left: string, right: string) => () => {
-        this.options.headerLeft = left;
-        this.options.headerRight = right;
+      updateHeaderContent: (left: string, right: string, pageNumber?: PageNumber) => () => {
+        if(pageNumber) {
+          this.options.customHeader = { ...this.options.customHeader, [pageNumber]: { headerLeft: left, headerRight: right } };
+        }else{
+          this.options.headerLeft = left;
+          this.options.headerRight = right;
+        }
         return true;
       },
-      updateFooterContent: (left: string, right: string) => () => {
-        this.options.footerLeft = left;
-        this.options.footerRight = right;
+      updateFooterContent: (left: string, right: string, pageNumber?: PageNumber) => () => {
+        if(pageNumber) {
+          this.options.customFooter = { ...this.options.customFooter, [pageNumber]: { footerLeft: left, footerRight: right } };
+        }else{
+          this.options.footerLeft = left;
+          this.options.footerRight = right;
+        }
         return true;
       },
     };
@@ -382,49 +513,14 @@ const getExistingPageCount = (view: EditorView) => {
   }
   return 0;
 };
-const needNewDecoration = (view: EditorView, pageOptions: PaginationPlusOptions, storage: PaginationPlusOptions) => {
-  let recalculatePageCount = false;
 
-  const editorDom = view.dom;
-  const paginationElement = editorDom.querySelector("[data-rm-pagination]");
-
-  
-  
-  if(paginationElement) {
-    const firstPageBreakPage = paginationElement.querySelector(".rm-page-break > .page") as HTMLElement;
-
-    if(firstPageBreakPage) {
-      const marginTop = parseFloat(getComputedStyle(firstPageBreakPage).marginTop);
-      const headerHeight = paginationElement.querySelector(".rm-first-page-header")?.clientHeight || 0;
-      const pageFooter = paginationElement.querySelector(".rm-page-footer") as HTMLElement;
-      if(storage.footerLeft !== pageOptions.footerLeft || storage.footerRight !== pageOptions.footerRight) {
-        pageFooter.innerHTML = getFooter(pageOptions.footerRight, pageOptions.footerLeft).innerHTML;
-      }
-
-      const footerHeight = pageFooter ? pageFooter.clientHeight : 0;
-
-      const _pageHeaderHeight = pageOptions.contentMarginTop + pageOptions.marginTop + headerHeight;
-      const _pageFooterHeight = pageOptions.contentMarginBottom + pageOptions.marginBottom + footerHeight;
-      const _pageHeight = pageOptions.pageHeight - _pageHeaderHeight - _pageFooterHeight;
-      console.log("Page Height", _pageHeight + _pageHeaderHeight, marginTop);
-
-      if(marginTop !== _pageHeight + _pageHeaderHeight) {
-        recalculatePageCount = true;
-      }
-
-    }
-  }
-
-  return recalculatePageCount;
-}
 const calculatePageCount = (
   view: EditorView,
-  pageOptions: PaginationPlusOptions
+  pageOptions: PaginationPlusOptions,
+  headerHeight: number = 0,
+  footerHeight: number = 0
 ) => {
   const editorDom = view.dom;
-  updateCssVariables(editorDom, pageOptions);
-  const headerHeight = editorDom.querySelector(".rm-first-page-header")?.clientHeight || 0;
-  const footerHeight = editorDom.querySelector(".rm-page-footer")?.clientHeight || 0;
 
   const _pageHeaderHeight = pageOptions.contentMarginTop + pageOptions.marginTop + headerHeight;
   const _pageFooterHeight = pageOptions.contentMarginBottom + pageOptions.marginBottom + footerHeight;
@@ -438,7 +534,7 @@ const calculatePageCount = (
   if (paginationElement) {
     const lastElementOfEditor = editorDom.lastElementChild;
     const lastPageBreak =
-    paginationElement.lastElementChild?.querySelector(".breaker");
+      paginationElement.lastElementChild?.querySelector(".breaker");
     if (lastElementOfEditor && lastPageBreak) {
       const lastElementRect = lastElementOfEditor.getBoundingClientRect();
       const lastPageBreakRect = lastPageBreak.getBoundingClientRect();
@@ -468,77 +564,52 @@ const calculatePageCount = (
     const editorHeight = editorDom.scrollHeight;
     let pageCount = Math.ceil(editorHeight / pageContentAreaHeight);
     pageCount = pageCount <= 0 ? 1 : pageCount;
-    console.log("returning pageCount", pageCount);
     return pageCount;
   }
 };
 
-function getFooter(footerRightContent: string, footerLeftContent: string){
-    const pageFooter = document.createElement("div");
-    pageFooter.classList.add("rm-page-footer");
-    // pageFooter.style.height = pageOptions.pageFooterHeight + "px";
-    pageFooter.style.overflow = "hidden";
-
-    const footerRight = footerRightContent.replace(
-      "{page}",
-      `<span class="rm-page-number"></span>`
-    );
-    const footerLeft = footerLeftContent.replace(
-      "{page}",
-      `<span class="rm-page-number"></span>`
-    );
-
-    const pageFooterLeft = document.createElement("div");
-    pageFooterLeft.classList.add("rm-page-footer-left");
-    pageFooterLeft.innerHTML = footerLeft;
-
-    const pageFooterRight = document.createElement("div");
-    pageFooterRight.classList.add("rm-page-footer-right");
-    pageFooterRight.innerHTML = footerRight;
-
-    pageFooter.append(pageFooterLeft);
-    pageFooter.append(pageFooterRight);
-
-    return pageFooter;
-}
-
 function createDecoration(
-  state: EditorState,
   pageOptions: PaginationPlusOptions,
-  isInitial: boolean = false
+  headerHeightMap: HeaderHeightMap,
+  footerHeightMap: FooterHeightMap
 ): Decoration[] {
+
+  const commonHeaderOptions = { headerLeft: pageOptions.headerLeft, headerRight: pageOptions.headerRight };
+  const commonFooterOptions = { footerLeft: pageOptions.footerLeft, footerRight: pageOptions.footerRight };
+      
+
   const pageWidget = Decoration.widget(
     0,
     (view) => {
-      const editorDom = view.dom;
       const _pageGap = pageOptions.pageGap;
       const _pageBreakBackground = pageOptions.pageBreakBackground;
-      const headerHeight = editorDom.querySelector(".rm-first-page-header")?.clientHeight || 0;
-      const footerHeight = editorDom.querySelector(".rm-page-footer")?.clientHeight || 0;
-      const _pageHeaderHeight = pageOptions.contentMarginTop + pageOptions.marginTop + headerHeight;
-      const _pageFooterHeight = pageOptions.contentMarginBottom + pageOptions.marginBottom + footerHeight;
-      const _pageHeight = pageOptions.pageHeight - _pageHeaderHeight - _pageFooterHeight;
-  
+      
+
       const el = document.createElement("div");
       el.dataset.rmPagination = "true";
-  
-      const pageBreakDefinition = ({
-        firstPage = false,
-      }: {
-        firstPage: boolean;
-      }) => {
+
+      const pageBreakDefinition = (firstPage: boolean, pageHeader: HTMLElement, pageFooter: HTMLElement, headerHeight: number, footerHeight: number, pageNumber?: PageNumber) => {
+        const { _pageHeaderHeight, _pageHeight } = getHeight(pageOptions, headerHeight, footerHeight);
+
         const pageContainer = document.createElement("div");
         pageContainer.classList.add("rm-page-break");
-  
+
         const page = document.createElement("div");
         page.classList.add("page");
         page.style.position = "relative";
         page.style.float = "left";
         page.style.clear = "both";
-        page.style.marginTop = firstPage
+        const marginTop = firstPage
           ? `calc(${_pageHeaderHeight}px + ${_pageHeight}px)`
           : _pageHeight + "px";
-  
+        if(pageNumber) {
+          page.style.marginTop = `var(--rm-page-content-${pageNumber}, ${marginTop})`;
+          }else{
+            page.style.marginTop = firstPage
+              ? `var(--rm-page-content-first, ${marginTop})`
+              : `var(--rm-page-content-general, ${marginTop})`;
+          }
+
         const pageBreak = document.createElement("div");
         pageBreak.classList.add("breaker");
         pageBreak.style.width = `calc(100% + var(--rm-margin-left) + var(--rm-margin-right))`;
@@ -550,10 +621,7 @@ function createDecoration(
         pageBreak.style.left = `0px`;
         pageBreak.style.right = `0px`;
         pageBreak.style.zIndex = "2";
-  
-        const pageFooter = getFooter(pageOptions.footerRight, pageOptions.footerLeft);
-  
-  
+
         const pageSpace = document.createElement("div");
         pageSpace.classList.add("rm-pagination-gap");
         pageSpace.style.height = _pageGap + "px";
@@ -565,55 +633,55 @@ function createDecoration(
         pageSpace.style.backgroundColor = _pageBreakBackground;
         pageSpace.style.borderLeftColor = _pageBreakBackground;
         pageSpace.style.borderRightColor = _pageBreakBackground;
-  
-        const pageHeader = document.createElement("div");
-        pageHeader.classList.add("rm-page-header");
-        // pageHeader.style.height = pageOptions.pageHeaderHeight + "px";
-        pageHeader.style.overflow = "hidden";
-  
-        const headerLeft = pageOptions.headerLeft.replace(
-          "{page}",
-          `<span class="rm-page-number-plus"></span>`
-        );
-        const headerRight = pageOptions.headerRight.replace(
-          "{page}",
-          `<span class="rm-page-number-plus"></span>`
-        );
 
-        const pageHeaderLeft = document.createElement("div");
-        pageHeaderLeft.classList.add("rm-page-header-left");
-        pageHeaderLeft.innerHTML = headerLeft;
-  
-        const pageHeaderRight = document.createElement("div");
-        pageHeaderRight.classList.add("rm-page-header-right");
-        pageHeaderRight.innerHTML = headerRight;
-  
-        pageHeader.append(pageHeaderLeft, pageHeaderRight);
         pageBreak.append(pageFooter, pageSpace, pageHeader);
         pageContainer.append(page, pageBreak);
-  
+
         return pageContainer;
       };
-  
-      const page = pageBreakDefinition({ firstPage: false });
-      const firstPage = pageBreakDefinition({
-        firstPage: true,
-      });
+
+      const _headerHeight = headerHeightMap.get(0) || 0;
+      const _footerHeight = footerHeightMap.get(0) || 0;
+
       const fragment = document.createDocumentFragment();
-  
+
       const pageCount = calculatePageCount(view, pageOptions);
-      console.log("We Need to create", pageCount, "pages");
-  
+
       for (let i = 0; i < pageCount; i++) {
-        if (i === 0) {
-          fragment.appendChild(firstPage.cloneNode(true));
-        } else {
-          fragment.appendChild(page.cloneNode(true));
+        const pageNumber = i+1;
+        const headerPageNumber = i+2;
+        if(headerPageNumber in pageOptions.customHeader || pageNumber in pageOptions.customFooter || pageNumber in pageOptions.customHeader) {
+
+          let _headerOptions = commonHeaderOptions;
+          let _footerOptions = commonFooterOptions;
+
+          let _pageHeaderHeight = _headerHeight;
+          let _pageFooterHeight = _footerHeight;
+          if(headerPageNumber in pageOptions.customHeader) {
+            _headerOptions = pageOptions.customHeader[headerPageNumber] || commonHeaderOptions;
+            _pageHeaderHeight = headerHeightMap.get(headerPageNumber) || 0;
+          }
+          if(pageNumber in pageOptions.customFooter) {
+            _footerOptions = pageOptions.customFooter[pageNumber] || commonFooterOptions;
+            _pageFooterHeight = footerHeightMap.get(pageNumber) || 0;
+          }
+          
+          let _pageHeader = getHeader(_headerOptions.headerRight, _headerOptions.headerLeft, headerClickEvent(headerPageNumber, pageOptions.onHeaderClick), headerPageNumber);
+          let _pageFooter = getFooter(_footerOptions.footerRight, _footerOptions.footerLeft, footerClickEvent(pageNumber, pageOptions.onFooterClick), pageNumber);
+
+          let pageBreak = pageBreakDefinition(i === 0, _pageHeader, _pageFooter, _pageHeaderHeight, _pageFooterHeight, pageNumber);
+          fragment.appendChild(pageBreak);
+        }else{
+          const __pageHeader = getHeader(commonHeaderOptions.headerRight, commonHeaderOptions.headerLeft, headerClickEvent(headerPageNumber, pageOptions.onHeaderClick));
+          const __pageFooter = getFooter(commonFooterOptions.footerRight, commonFooterOptions.footerLeft, footerClickEvent(pageNumber, pageOptions.onFooterClick));
+          fragment.appendChild(pageBreakDefinition(i === 0, __pageHeader, __pageFooter, _headerHeight, _footerHeight));
         }
+
       }
       el.append(fragment);
       el.id = "pages";
-  
+      el.classList.add("rm-pages-wrapper");
+
       return el;
     },
     { side: -1 }
@@ -621,35 +689,18 @@ function createDecoration(
   const firstHeaderWidget = Decoration.widget(
     0,
     () => {
-      const el = document.createElement("div");
-      el.style.position = "relative";
+      const pageNumber = 1;
+      
+      let _headerOptions = commonHeaderOptions;
+      if(pageNumber in pageOptions.customHeader) {
+        _headerOptions = pageOptions.customHeader[pageNumber];
+      }
+      const el = getHeader(_headerOptions.headerRight, _headerOptions.headerLeft, headerClickEvent(pageNumber, pageOptions.onHeaderClick));
       el.classList.add("rm-first-page-header");
-
-      const headerLeft = pageOptions.headerLeft.replace(
-        "{page}",
-        `1`
-      );
-      const headerRight = pageOptions.headerRight.replace(
-        "{page}",
-        `1`
-      );
-
-      const pageHeaderLeft = document.createElement("div");
-      pageHeaderLeft.classList.add("rm-first-page-header-left");
-      pageHeaderLeft.innerHTML = headerLeft;
-      el.append(pageHeaderLeft);
-
-      const pageHeaderRight = document.createElement("div");
-      pageHeaderRight.classList.add("rm-first-page-header-right");
-      pageHeaderRight.innerHTML = headerRight;
-      el.append(pageHeaderRight);
-
-      // el.style.height = `${pageOptions.pageHeaderHeight}px`;
-      el.style.overflow = "hidden";
       return el;
     },
     { side: -1 }
   );
 
-  return !isInitial ? [pageWidget, firstHeaderWidget] : [pageWidget];
+  return [pageWidget, firstHeaderWidget];
 }
