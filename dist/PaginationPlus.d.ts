@@ -30,6 +30,7 @@ export interface PaginationPlusStorage extends PaginationPlusOptions {
     footerHeight: FooterHeightMap;
     lastPageCount: number;
     iterationCount: number;
+    baseContentHeight: number;
 }
 declare module "@tiptap/core" {
     interface Commands<ReturnType> {
