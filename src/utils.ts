@@ -1,135 +1,183 @@
 import { PaginationPlusOptions } from "./PaginationPlus";
 import { PageSize } from "./constants";
-import { FooterClickEvent, FooterHeightMap, FooterOptions, HeaderClickEvent, HeaderHeightMap, HeaderOptions, PageNumber } from "./types";
+import {
+  FooterClickEvent,
+  FooterHeightMap,
+  FooterOptions,
+  HeaderClickEvent,
+  HeaderHeightMap,
+  HeaderOptions,
+  PageNumber,
+} from "./types";
 
-export const updateCssVariables = (targetNode: HTMLElement, config: PaginationPlusOptions) => {
-
-    const cssVariables = {
-        "rm-page-height": `${config.pageHeight}px`,
-        "rm-margin-top": `${config.marginTop}px`,
-        "rm-margin-bottom": `${config.marginBottom}px`,
-        "rm-margin-left": `${config.marginLeft}px`,
-        "rm-margin-right": `${config.marginRight}px`,
-        "rm-content-margin-top": `${config.contentMarginTop}px`,
-        "rm-content-margin-bottom": `${config.contentMarginBottom}px`,
-        "rm-page-gap-border-color": `${config.pageGapBorderColor}`,
-        "rm-page-width": `${config.pageWidth}px`,
-      }
+export const updateCssVariables = (
+  targetNode: HTMLElement,
+  config: PaginationPlusOptions
+) => {
+  const cssVariables = {
+    "rm-page-height": `${config.pageHeight}px`,
+    "rm-margin-top": `${config.marginTop}px`,
+    "rm-margin-bottom": `${config.marginBottom}px`,
+    "rm-margin-left": `${config.marginLeft}px`,
+    "rm-margin-right": `${config.marginRight}px`,
+    "rm-content-margin-top": `${config.contentMarginTop}px`,
+    "rm-content-margin-bottom": `${config.contentMarginBottom}px`,
+    "rm-page-gap-border-color": `${config.pageGapBorderColor}`,
+    "rm-page-width": `${config.pageWidth}px`,
+  };
 
   Object.entries(cssVariables).forEach(([key, value]) => {
     targetNode.style.setProperty(`--${key}`, value);
   });
-}
+};
 
+export const getPageSize = (
+  height: number,
+  width: number,
+  marginTop: number,
+  marginBottom: number,
+  marginLeft: number,
+  marginRight: number
+): PageSize => {
+  return {
+    pageHeight: height,
+    pageWidth: width,
+    marginTop,
+    marginBottom,
+    marginLeft,
+    marginRight,
+  };
+};
 
-export const getPageSize = (height: number, width: number, marginTop: number, marginBottom: number, marginLeft: number, marginRight: number): PageSize => {
-    return {
-        pageHeight: height,
-        pageWidth: width,
-        marginTop,
-        marginBottom,
-        marginLeft,
-        marginRight,
-    }
-}
-
-export const getHeaderHeight = (targetNode: HTMLElement, pageNumbers: PageNumber[], type: "actual" | "content") => {
+export const getHeaderHeight = (
+  targetNode: HTMLElement,
+  pageNumbers: PageNumber[],
+  type: "actual" | "content"
+) => {
   const headerHeightMap = new Map<PageNumber, number>();
 
   // Find general header height
-  const clientHeader = targetNode.querySelector(getHeaderHeightSelector(0, type));
+  const clientHeader = targetNode.querySelector(
+    getHeaderHeightSelector(0, type)
+  );
   headerHeightMap.set(0, clientHeader ? clientHeader.clientHeight : 0);
-  
+
   // Find header height for each page number
-  pageNumbers.forEach(pageNumber => {
-    const clientHeader = targetNode.querySelector(getHeaderHeightSelector(pageNumber, type));
+  pageNumbers.forEach((pageNumber) => {
+    const clientHeader = targetNode.querySelector(
+      getHeaderHeightSelector(pageNumber, type)
+    );
     const headerHeight = clientHeader ? clientHeader.clientHeight : 0;
     headerHeightMap.set(pageNumber, headerHeight);
   });
 
   return headerHeightMap;
-}
+};
 
-export const getHeaderHeightSelector = (pageNumber: PageNumber, type: "actual" | "content") => {
-  return type === "actual" ? `.rm-page-header-${pageNumber}` : `.rm-page-header-${pageNumber} .rm-page-header-content`;
-}
+export const getHeaderHeightSelector = (
+  pageNumber: PageNumber,
+  type: "actual" | "content"
+) => {
+  return type === "actual"
+    ? `.rm-page-header-${pageNumber}`
+    : `.rm-page-header-${pageNumber} .rm-page-header-content`;
+};
 
-export const getFooterHeight = (targetNode: HTMLElement, pageNumbers: PageNumber[], type: "actual" | "content") => {
+export const getFooterHeight = (
+  targetNode: HTMLElement,
+  pageNumbers: PageNumber[],
+  type: "actual" | "content"
+) => {
   const footerHeightMap = new Map<PageNumber, number>();
-  
+
   // Find general footer height
-  const clientFooter = targetNode.querySelector(getFooterHeightSelector(0, type));
+  const clientFooter = targetNode.querySelector(
+    getFooterHeightSelector(0, type)
+  );
   footerHeightMap.set(0, clientFooter ? clientFooter.clientHeight : 0);
-  
+
   // Find footer height for each page number
-  pageNumbers.forEach(pageNumber => {
-    const clientFooter = targetNode.querySelector(getFooterHeightSelector(pageNumber, type));
+  pageNumbers.forEach((pageNumber) => {
+    const clientFooter = targetNode.querySelector(
+      getFooterHeightSelector(pageNumber, type)
+    );
     const footerHeight = clientFooter ? clientFooter.clientHeight : 0;
     footerHeightMap.set(pageNumber, footerHeight);
   });
 
   return footerHeightMap;
-}
+};
 
-export const getFooterHeightSelector = (pageNumber: PageNumber, type: "actual" | "content") => {
-  return type === "actual" ? `.rm-page-footer-${pageNumber}` : `.rm-page-footer-${pageNumber} .rm-page-footer-content`;
-}
+export const getFooterHeightSelector = (
+  pageNumber: PageNumber,
+  type: "actual" | "content"
+) => {
+  return type === "actual"
+    ? `.rm-page-footer-${pageNumber}`
+    : `.rm-page-footer-${pageNumber} .rm-page-footer-content`;
+};
 
 export function deepEqualIterative(a: any, b: any): boolean {
   // Quick reference check
   if (a === b) return true;
 
   // One is null or type mismatch
-  if (typeof a !== "object" || typeof b !== "object" || a == null || b == null) {
-      return false;
+  if (
+    typeof a !== "object" ||
+    typeof b !== "object" ||
+    a == null ||
+    b == null
+  ) {
+    return false;
   }
 
   // Stack for iterative traversal
   const stack = [{ x: a, y: b }];
 
   while (stack.length) {
-      const _stackItem = stack.pop();
-      if (!_stackItem) continue;
-      const { x, y } = _stackItem;
+    const _stackItem = stack.pop();
+    if (!_stackItem) continue;
+    const { x, y } = _stackItem;
 
-      // If primitive mismatch
-      if (x === y) continue;
-      if (typeof x !== typeof y) return false;
-      if (typeof x !== "object") return false;
+    // If primitive mismatch
+    if (x === y) continue;
+    if (typeof x !== typeof y) return false;
+    if (typeof x !== "object") return false;
 
-      if (x == null || y == null) return false;
+    if (x == null || y == null) return false;
 
-      const xKeys = Object.keys(x);
-      const yKeys = Object.keys(y);
+    const xKeys = Object.keys(x);
+    const yKeys = Object.keys(y);
 
-      // Length mismatch
-      if (xKeys.length !== yKeys.length) return false;
+    // Length mismatch
+    if (xKeys.length !== yKeys.length) return false;
 
-      // Check keys
-      for (const key of xKeys) {
-          if (!(key in y)) return false;
+    // Check keys
+    for (const key of xKeys) {
+      if (!(key in y)) return false;
 
-          const xVal = x[key];
-          const yVal = y[key];
+      const xVal = x[key];
+      const yVal = y[key];
 
-          // Same reference — skip
-          if (xVal === yVal) continue;
+      // Same reference — skip
+      if (xVal === yVal) continue;
 
-          // Push nested objects/arrays to stack
-          if (typeof xVal === "object" && typeof yVal === "object") {
-              stack.push({ x: xVal, y: yVal });
-          } else {
-              // Primitive compare
-              if (xVal !== yVal) return false;
-          }
+      // Push nested objects/arrays to stack
+      if (typeof xVal === "object" && typeof yVal === "object") {
+        stack.push({ x: xVal, y: yVal });
+      } else {
+        // Primitive compare
+        if (xVal !== yVal) return false;
       }
+    }
   }
 
   return true;
 }
 
 export function mapNumberEqual(a: Map<number, number>, b: Map<number, number>) {
-  if ((!(a instanceof Map)) || (!(b instanceof Map)) || a.size !== b.size) return false;
+  if (!(a instanceof Map) || !(b instanceof Map) || a.size !== b.size)
+    return false;
 
   for (const [k, v] of a) {
     if (b.get(k) !== v) return false;
@@ -137,12 +185,23 @@ export function mapNumberEqual(a: Map<number, number>, b: Map<number, number>) {
   return true;
 }
 
-export function getCustomPages(customHeader: Record<PageNumber, HeaderOptions>, customFooter: Record<PageNumber, FooterOptions>) {
-  return [...Object.keys(customHeader), ...Object.keys(customFooter)].map(Number);
+export function getCustomPages(
+  customHeader: Record<PageNumber, HeaderOptions>,
+  customFooter: Record<PageNumber, FooterOptions>
+) {
+  return [...Object.keys(customHeader), ...Object.keys(customFooter)].map(
+    Number
+  );
 }
 
-
-export function getFooter(footerRightContent: string, footerLeftContent: string, onFooterClick: (event: MouseEvent) => void, pageNumber?: PageNumber) {
+// UPDATED: Added centerContent parameter
+export function getFooter(
+  footerRightContent: string,
+  footerLeftContent: string,
+  footerCenterContent: string, // NEW
+  onFooterClick: (event: MouseEvent) => void,
+  pageNumber?: PageNumber
+) {
   const pageFooter = document.createElement("div");
   pageFooter.classList.add("rm-page-footer");
   pageFooter.classList.add(`rm-page-footer-${pageNumber ? pageNumber : 0}`);
@@ -163,16 +222,27 @@ export function getFooter(footerRightContent: string, footerLeftContent: string,
     "{page}",
     `<span class="rm-page-number"></span>`
   );
+  // NEW: Process center content
+  const footerCenter = footerCenterContent.replace(
+    "{page}",
+    `<span class="rm-page-number"></span>`
+  );
 
   const pageFooterLeft = document.createElement("div");
   pageFooterLeft.classList.add("rm-page-footer-left");
   pageFooterLeft.innerHTML = footerLeft;
 
+  // NEW: Create center element
+  const pageFooterCenter = document.createElement("div");
+  pageFooterCenter.classList.add("rm-page-footer-center");
+  pageFooterCenter.innerHTML = footerCenter;
+
   const pageFooterRight = document.createElement("div");
   pageFooterRight.classList.add("rm-page-footer-right");
   pageFooterRight.innerHTML = footerRight;
 
-  pageFooterContent.append(pageFooterLeft, pageFooterRight);
+  // NEW: Append all three (left, center, right)
+  pageFooterContent.append(pageFooterLeft, pageFooterCenter, pageFooterRight);
 
   pageFooter.append(pageFooterContent);
 
@@ -181,80 +251,113 @@ export function getFooter(footerRightContent: string, footerLeftContent: string,
   return pageFooter;
 }
 
-export function getHeader(headerRightContent: string, headerLeftContent: string, onHeaderClick: (event: MouseEvent) => void, pageNumber?: PageNumber) {
+// UPDATED: Added centerContent parameter
+export function getHeader(
+  headerRightContent: string,
+  headerLeftContent: string,
+  headerCenterContent: string, // NEW
+  onHeaderClick: (event: MouseEvent) => void,
+  pageNumber?: PageNumber
+) {
   const pageHeader = document.createElement("div");
-      pageHeader.classList.add("rm-page-header");
-      pageHeader.classList.add(`rm-page-header-${pageNumber ? pageNumber : 0}`);
-      pageHeader.style.overflow = "hidden";
-      pageHeader.style.cursor = "pointer";
-      pageHeader.style.position = "relative";
+  pageHeader.classList.add("rm-page-header");
+  pageHeader.classList.add(`rm-page-header-${pageNumber ? pageNumber : 0}`);
+  pageHeader.style.overflow = "hidden";
+  pageHeader.style.cursor = "pointer";
+  pageHeader.style.position = "relative";
 
-      const pageHeaderContent = document.createElement("div");
-      pageHeaderContent.classList.add("rm-page-header-content");
-      pageHeaderContent.style.width = "100%";
-      pageHeaderContent.style.overflow = "hidden";
+  const pageHeaderContent = document.createElement("div");
+  pageHeaderContent.classList.add("rm-page-header-content");
+  pageHeaderContent.style.width = "100%";
+  pageHeaderContent.style.overflow = "hidden";
 
-      const headerLeft = headerLeftContent.replace(
-        "{page}",
-        `<span class="rm-page-number-plus"></span>`
-      );
-      const headerRight = headerRightContent.replace(
-        "{page}",
-        `<span class="rm-page-number-plus"></span>`
-      );
+  const headerLeft = headerLeftContent.replace(
+    "{page}",
+    `<span class="rm-page-number-plus"></span>`
+  );
+  const headerRight = headerRightContent.replace(
+    "{page}",
+    `<span class="rm-page-number-plus"></span>`
+  );
+  // NEW: Process center content
+  const headerCenter = headerCenterContent.replace(
+    "{page}",
+    `<span class="rm-page-number-plus"></span>`
+  );
 
-      const pageHeaderLeft = document.createElement("div");
-      pageHeaderLeft.classList.add("rm-page-header-left");
-      pageHeaderLeft.innerHTML = headerLeft;
+  const pageHeaderLeft = document.createElement("div");
+  pageHeaderLeft.classList.add("rm-page-header-left");
+  pageHeaderLeft.innerHTML = headerLeft;
 
-      const pageHeaderRight = document.createElement("div");
-      pageHeaderRight.classList.add("rm-page-header-right");
-      pageHeaderRight.innerHTML = headerRight;
+  // NEW: Create center element
+  const pageHeaderCenter = document.createElement("div");
+  pageHeaderCenter.classList.add("rm-page-header-center");
+  pageHeaderCenter.innerHTML = headerCenter;
 
-      pageHeaderContent.append(pageHeaderLeft, pageHeaderRight);
-      pageHeader.append(pageHeaderContent);
+  const pageHeaderRight = document.createElement("div");
+  pageHeaderRight.classList.add("rm-page-header-right");
+  pageHeaderRight.innerHTML = headerRight;
 
-        pageHeader.addEventListener("click", onHeaderClick);
+  // NEW: Append all three (left, center, right)
+  pageHeaderContent.append(pageHeaderLeft, pageHeaderCenter, pageHeaderRight);
+  pageHeader.append(pageHeaderContent);
 
+  pageHeader.addEventListener("click", onHeaderClick);
 
-      return pageHeader;
+  return pageHeader;
 }
 
-export const getHeight = (pageOptions: PaginationPlusOptions, _headerHeight: number, _footerHeight: number) => {
-  const _pageHeaderHeight = pageOptions.contentMarginTop + pageOptions.marginTop + _headerHeight;
-  const _pageFooterHeight = pageOptions.contentMarginBottom + pageOptions.marginBottom + _footerHeight;
-  const _pageHeight = pageOptions.pageHeight - _pageHeaderHeight - _pageFooterHeight;
+export const getHeight = (
+  pageOptions: PaginationPlusOptions,
+  _headerHeight: number,
+  _footerHeight: number
+) => {
+  const _pageHeaderHeight =
+    pageOptions.contentMarginTop + pageOptions.marginTop + _headerHeight;
+  const _pageFooterHeight =
+    pageOptions.contentMarginBottom + pageOptions.marginBottom + _footerHeight;
+  const _pageHeight =
+    pageOptions.pageHeight - _pageHeaderHeight - _pageFooterHeight;
   return {
     _pageHeaderHeight,
     _pageFooterHeight,
     _pageHeight,
-  }
-}
+  };
+};
 
-export const getContentHeight = (editorDom: HTMLElement, pageNumber: PageNumber) => {
-
-  const pageBreak = editorDom.querySelector('#pages > .rm-page-break:nth-child(' + pageNumber + ') > .page');
-  if(pageBreak) {
+export const getContentHeight = (
+  editorDom: HTMLElement,
+  pageNumber: PageNumber
+) => {
+  const pageBreak = editorDom.querySelector(
+    "#pages > .rm-page-break:nth-child(" + pageNumber + ") > .page"
+  );
+  if (pageBreak) {
     return parseFloat(window.getComputedStyle(pageBreak).marginTop);
   }
   return 0;
+};
 
-}
-
-export const headerClickEvent = (pageNumber: PageNumber, onHeaderClick?: HeaderClickEvent) => {
+export const headerClickEvent = (
+  pageNumber: PageNumber,
+  onHeaderClick?: HeaderClickEvent
+) => {
   return (event: MouseEvent) => {
     onHeaderClick?.({
       event: event,
-      pageNumber: pageNumber
+      pageNumber: pageNumber,
     });
-  }
-}
+  };
+};
 
-export const footerClickEvent = (pageNumber: PageNumber, onFooterClick?: FooterClickEvent) => {
+export const footerClickEvent = (
+  pageNumber: PageNumber,
+  onFooterClick?: FooterClickEvent
+) => {
   return (event: MouseEvent) => {
     onFooterClick?.({
       event: event,
-      pageNumber: pageNumber
+      pageNumber: pageNumber,
     });
-  }
-}
+  };
+};
