@@ -30,7 +30,15 @@ export interface PaginationPlusStorage extends PaginationPlusOptions {
     footerHeight: FooterHeightMap;
     lastPageCount: number;
     iterationCount: number;
-    baseContentHeight: number;
+}
+declare global {
+    interface Window {
+        __paginationPlusLock?: {
+            isLocked: boolean;
+            lockTime: number;
+            iterationCount: number;
+        };
+    }
 }
 declare module "@tiptap/core" {
     interface Commands<ReturnType> {

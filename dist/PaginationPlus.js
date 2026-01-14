@@ -4,11 +4,61 @@ import { ReplaceStep, ReplaceAroundStep, AddMarkStep, RemoveMarkStep, RemoveNode
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { deepEqualIterative, footerClickEvent, getCustomPages, getFooter, getFooterHeight, getHeader, getHeaderHeight, getHeight, headerClickEvent, updateCssVariables, } from "./utils";
 const page_count_meta_key = "PAGE_COUNT_META_KEY";
-// Maximum iterations to prevent infinite loop
-const MAX_PAGINATION_ITERATIONS = 30;
-// GLOBAL state
-let globalIterationCount = 0;
-let globalBaseContentHeight = 0; // Store content height before pagination elements are added
+// ============================================================================
+// GLOBAL LOCK SYSTEM - Persists across ALL React re-renders and editor instances
+// ============================================================================
+const LOCK_DURATION_MS = 3000; // Lock for 3 seconds after max iterations
+const MAX_ITERATIONS = 30;
+// Initialize or get existing lock state
+const getLockState = () => {
+    if (!window.__paginationPlusLock) {
+        window.__paginationPlusLock = {
+            isLocked: false,
+            lockTime: 0,
+            iterationCount: 0,
+        };
+    }
+    return window.__paginationPlusLock;
+};
+const isLocked = () => {
+    const state = getLockState();
+    if (!state.isLocked)
+        return false;
+    // Auto-unlock after LOCK_DURATION_MS
+    if (Date.now() - state.lockTime > LOCK_DURATION_MS) {
+        console.log("🔓 Auto-unlocking after timeout");
+        state.isLocked = false;
+        state.iterationCount = 0;
+        return false;
+    }
+    return true;
+};
+const incrementIteration = () => {
+    const state = getLockState();
+    state.iterationCount++;
+    return state.iterationCount;
+};
+const checkAndLock = () => {
+    const state = getLockState();
+    if (state.iterationCount > MAX_ITERATIONS) {
+        console.error(`🛑 LOCKING PAGINATION - Max iterations (${MAX_ITERATIONS}) exceeded`);
+        state.isLocked = true;
+        state.lockTime = Date.now();
+        return true;
+    }
+    return false;
+};
+const resetIterations = () => {
+    const state = getLockState();
+    state.iterationCount = 0;
+};
+const forceUnlock = () => {
+    const state = getLockState();
+    console.log("🔓 Force unlocking pagination");
+    state.isLocked = false;
+    state.iterationCount = 0;
+    state.lockTime = 0;
+};
 const key = new PluginKey("brDecoration");
 function buildDecorations(doc) {
     const decorations = [];
@@ -59,56 +109,15 @@ const refreshPage = (targetNode) => {
     }
 };
 const paginationKey = new PluginKey("pagination");
-/**
- * Calculate the ACTUAL content height, excluding pagination elements
- */
-const getActualContentHeight = (editorDom) => {
-    // Get all direct children that are NOT pagination-related
-    const children = Array.from(editorDom.children);
-    let totalHeight = 0;
-    for (const child of children) {
-        // Skip pagination wrapper and page breaks
-        if (child.id === "pages" ||
-            child.classList.contains("rm-pages-wrapper") ||
-            child.classList.contains("rm-page-break") ||
-            child.classList.contains("rm-first-page-header") ||
-            child.hasAttribute("data-rm-pagination")) {
-            continue;
-        }
-        // Get the actual rendered height of content elements
-        const rect = child.getBoundingClientRect();
-        totalHeight += rect.height;
-    }
-    return totalHeight;
-};
-/**
- * Calculate page count based on CONTENT only, not pagination elements
- */
-const calculatePageCountFromContent = (contentHeight, pageOptions, headerHeight = 0, footerHeight = 0) => {
-    const _pageHeaderHeight = pageOptions.contentMarginTop + pageOptions.marginTop + headerHeight;
-    const _pageFooterHeight = pageOptions.contentMarginBottom + pageOptions.marginBottom + footerHeight;
-    // Available content area per page
-    const pageContentAreaHeight = pageOptions.pageHeight - _pageHeaderHeight - _pageFooterHeight;
-    if (pageContentAreaHeight <= 50) {
-        console.warn("PaginationPlus: Page content area too small");
-        return 1;
-    }
-    // Simple calculation: content height / available height per page
-    const pageCount = Math.ceil(contentHeight / pageContentAreaHeight);
-    return Math.max(1, pageCount);
-};
 export const PaginationPlus = Extension.create({
     name: "PaginationPlus",
     addOptions() {
         return defaultOptions;
     },
     addStorage() {
-        return Object.assign(Object.assign({}, defaultOptions), { headerHeight: new Map(), footerHeight: new Map(), lastPageCount: 0, iterationCount: 0, baseContentHeight: 0 });
+        return Object.assign(Object.assign({}, defaultOptions), { headerHeight: new Map(), footerHeight: new Map(), lastPageCount: 0, iterationCount: 0 });
     },
     onCreate() {
-        // Reset global state on new editor
-        globalIterationCount = 0;
-        globalBaseContentHeight = 0;
         const targetNode = this.editor.view.dom;
         targetNode.classList.add("rm-with-pagination");
         targetNode.style.border = `1px solid var(--rm-page-gap-border-color)`;
@@ -247,30 +256,35 @@ export const PaginationPlus = Extension.create({
     },
     addProseMirrorPlugins() {
         const editor = this.editor;
-        const extensionThis = this;
         return [
             new Plugin({
                 key: paginationKey,
                 state: {
                     init: (_, state) => {
-                        const widgetList = createDecoration(extensionThis.options, new Map(), new Map());
-                        extensionThis.storage = Object.assign(Object.assign({}, extensionThis.options), { headerHeight: new Map(), footerHeight: new Map(), lastPageCount: 0, iterationCount: 0, baseContentHeight: 0 });
+                        const widgetList = createDecoration(this.options, new Map(), new Map());
+                        this.storage = Object.assign(Object.assign({}, this.options), { headerHeight: new Map(), footerHeight: new Map(), lastPageCount: 0, iterationCount: 0 });
                         return {
                             decorations: DecorationSet.create(state.doc, widgetList),
                         };
                     },
                     apply: (tr, oldDeco, oldState, newState) => {
+                        // If locked, don't update decorations
+                        if (isLocked()) {
+                            return oldDeco;
+                        }
+                        const pageCount = calculatePageCount(editor.view, this.options);
+                        const currentPageCount = getExistingPageCount(editor.view);
                         const getNewDecoration = () => {
-                            updateCssVariables(editor.view.dom, extensionThis.options);
-                            let headerHeight = "headerHeight" in extensionThis.storage
-                                ? extensionThis.storage.headerHeight
+                            updateCssVariables(editor.view.dom, this.options);
+                            let headerHeight = "headerHeight" in this.storage
+                                ? this.storage.headerHeight
                                 : new Map();
-                            let footerHeight = "footerHeight" in extensionThis.storage
-                                ? extensionThis.storage.footerHeight
+                            let footerHeight = "footerHeight" in this.storage
+                                ? this.storage.footerHeight
                                 : new Map();
-                            const widgetList = createDecoration(extensionThis.options, headerHeight, footerHeight);
-                            extensionThis.storage = Object.assign(Object.assign({}, extensionThis.options), { headerHeight,
-                                footerHeight, lastPageCount: extensionThis.storage.lastPageCount, iterationCount: extensionThis.storage.iterationCount, baseContentHeight: extensionThis.storage.baseContentHeight });
+                            const widgetList = createDecoration(this.options, headerHeight, footerHeight);
+                            this.storage = Object.assign(Object.assign({}, this.options), { headerHeight,
+                                footerHeight, lastPageCount: this.storage.lastPageCount, iterationCount: this.storage.iterationCount });
                             return {
                                 decorations: DecorationSet.create(newState.doc, [
                                     ...widgetList,
@@ -278,50 +292,27 @@ export const PaginationPlus = Extension.create({
                                 footerHeight,
                             };
                         };
-                        // Check if we need to recalculate
-                        const needsRecalc = extensionThis.storage.pageBreakBackground !==
-                            extensionThis.options.pageBreakBackground ||
-                            extensionThis.storage.pageHeight !==
-                                extensionThis.options.pageHeight ||
-                            extensionThis.storage.pageWidth !==
-                                extensionThis.options.pageWidth ||
-                            extensionThis.storage.marginTop !==
-                                extensionThis.options.marginTop ||
-                            extensionThis.storage.marginBottom !==
-                                extensionThis.options.marginBottom ||
-                            extensionThis.storage.marginLeft !==
-                                extensionThis.options.marginLeft ||
-                            extensionThis.storage.marginRight !==
-                                extensionThis.options.marginRight ||
-                            extensionThis.storage.pageGap !== extensionThis.options.pageGap ||
-                            extensionThis.storage.contentMarginTop !==
-                                extensionThis.options.contentMarginTop ||
-                            extensionThis.storage.contentMarginBottom !==
-                                extensionThis.options.contentMarginBottom ||
-                            extensionThis.storage.headerLeft !==
-                                extensionThis.options.headerLeft ||
-                            extensionThis.storage.headerRight !==
-                                extensionThis.options.headerRight ||
-                            extensionThis.storage.headerCenter !==
-                                extensionThis.options.headerCenter ||
-                            extensionThis.storage.footerLeft !==
-                                extensionThis.options.footerLeft ||
-                            extensionThis.storage.footerRight !==
-                                extensionThis.options.footerRight ||
-                            extensionThis.storage.footerCenter !==
-                                extensionThis.options.footerCenter ||
-                            !deepEqualIterative(extensionThis.options.customHeader, extensionThis.storage.customHeader) ||
-                            !deepEqualIterative(extensionThis.options.customFooter, extensionThis.storage.customFooter) ||
-                            tr.docChanged;
-                        if (needsRecalc) {
-                            // Reset base content height when settings change
-                            if (extensionThis.storage.pageHeight !==
-                                extensionThis.options.pageHeight ||
-                                extensionThis.storage.pageWidth !==
-                                    extensionThis.options.pageWidth) {
-                                globalBaseContentHeight = 0;
-                                globalIterationCount = 0;
-                            }
+                        if ((pageCount > 1 ? pageCount : 1) !== currentPageCount ||
+                            this.storage.pageBreakBackground !==
+                                this.options.pageBreakBackground ||
+                            this.storage.pageHeight !== this.options.pageHeight ||
+                            this.storage.pageWidth !== this.options.pageWidth ||
+                            this.storage.marginTop !== this.options.marginTop ||
+                            this.storage.marginBottom !== this.options.marginBottom ||
+                            this.storage.marginLeft !== this.options.marginLeft ||
+                            this.storage.marginRight !== this.options.marginRight ||
+                            this.storage.pageGap !== this.options.pageGap ||
+                            this.storage.contentMarginTop !== this.options.contentMarginTop ||
+                            this.storage.contentMarginBottom !==
+                                this.options.contentMarginBottom ||
+                            this.storage.headerLeft !== this.options.headerLeft ||
+                            this.storage.headerRight !== this.options.headerRight ||
+                            this.storage.headerCenter !== this.options.headerCenter ||
+                            this.storage.footerLeft !== this.options.footerLeft ||
+                            this.storage.footerRight !== this.options.footerRight ||
+                            this.storage.footerCenter !== this.options.footerCenter ||
+                            !deepEqualIterative(this.options.customHeader, this.storage.customHeader) ||
+                            !deepEqualIterative(this.options.customFooter, this.storage.customFooter)) {
                             return getNewDecoration();
                         }
                         return oldDeco;
@@ -334,108 +325,106 @@ export const PaginationPlus = Extension.create({
                     },
                 },
                 view: (editorView) => {
-                    console.log("🔄 VIEW CREATED");
-                    globalIterationCount = 0;
+                    console.log("🔄 VIEW CREATED - isLocked:", isLocked());
                     return {
                         update: (view) => {
-                            globalIterationCount++;
-                            // Get current and target page counts
+                            // FIRST CHECK: If locked, do nothing
+                            if (isLocked()) {
+                                return;
+                            }
+                            const iteration = incrementIteration();
+                            const pageCount = calculatePageCount(view, this.options);
                             const currentPageCount = getExistingPageCount(view);
-                            // Calculate content height (excluding pagination elements)
-                            const contentHeight = getActualContentHeight(view.dom);
-                            // Store base content height on first calculation or when it increases
-                            // (it should only increase when user adds content, not from pagination)
-                            if (globalBaseContentHeight === 0 ||
-                                contentHeight > globalBaseContentHeight * 1.5) {
-                                globalBaseContentHeight = contentHeight;
-                                console.log(`📏 Base content height set to: ${globalBaseContentHeight}px`);
+                            // Log every 5 iterations
+                            if (iteration <= 5 || iteration % 5 === 0) {
+                                console.log(`📄 #${iteration} | calc:${pageCount} | curr:${currentPageCount}`);
                             }
-                            // Calculate target page count based on BASE content height
-                            const targetPageCount = calculatePageCountFromContent(globalBaseContentHeight, extensionThis.options);
-                            console.log(`📄 #${globalIterationCount} | content:${contentHeight}px | base:${globalBaseContentHeight}px | curr:${currentPageCount} | target:${targetPageCount}`);
-                            // Check for infinite loop
-                            if (globalIterationCount > MAX_PAGINATION_ITERATIONS) {
-                                console.warn(`🛑 Max iterations reached - stabilizing at ${currentPageCount} pages`);
-                                globalIterationCount = 0;
+                            // Check if we should lock
+                            if (checkAndLock()) {
                                 return;
                             }
-                            // If we're close to target, stop
-                            if (Math.abs(currentPageCount - targetPageCount) <= 1) {
-                                console.log(`✅ Stable at ${currentPageCount} pages`);
-                                globalIterationCount = 0;
-                                // Continue with height calculations
-                                const headerHeight = getHeaderHeight(view.dom, getCustomPages(extensionThis.options.customHeader, {}), "content");
-                                const footerHeight = getFooterHeight(view.dom, getCustomPages({}, extensionThis.options.customFooter), "content");
-                                const footerHeightForCurrentPages = new Map();
-                                for (let i = 0; i <= currentPageCount; i++) {
-                                    if (footerHeight.has(i)) {
-                                        footerHeightForCurrentPages.set(i, footerHeight.get(i) || 0);
-                                    }
-                                }
-                                const headerHeightForCurrentPages = new Map();
-                                for (let i = 0; i <= currentPageCount; i++) {
-                                    if (headerHeight.has(i)) {
-                                        headerHeightForCurrentPages.set(i, headerHeight.get(i) || 0);
-                                    }
-                                }
-                                const pagesSetToCheck = new Set([
-                                    1,
-                                    ...footerHeightForCurrentPages.keys(),
-                                    ...headerHeightForCurrentPages.keys(),
-                                ]);
-                                let missingPageNumber = undefined;
-                                for (let i = 1; i <= currentPageCount; i++) {
-                                    if (!pagesSetToCheck.has(i)) {
-                                        missingPageNumber = i;
-                                        break;
-                                    }
-                                }
-                                if (missingPageNumber) {
-                                    pagesSetToCheck.add(missingPageNumber);
-                                }
-                                pagesSetToCheck.delete(0);
-                                let pageContentHeightVariable = {};
-                                let maxContentHeight = undefined;
-                                for (const page of pagesSetToCheck) {
-                                    const hHeight = headerHeightForCurrentPages.has(page)
-                                        ? headerHeightForCurrentPages.get(page) || 0
-                                        : headerHeightForCurrentPages.get(0) || 0;
-                                    const fHeight = footerHeightForCurrentPages.has(page)
-                                        ? footerHeightForCurrentPages.get(page) || 0
-                                        : footerHeightForCurrentPages.get(0) || 0;
-                                    const { _pageHeaderHeight, _pageHeight } = getHeight(extensionThis.options, hHeight, fHeight);
-                                    const calcContentHeight = page === 1 ? _pageHeight + _pageHeaderHeight : _pageHeight;
-                                    if (page === 1) {
-                                        pageContentHeightVariable[`rm-page-content-first`] = `${calcContentHeight}px`;
-                                    }
-                                    if (page === missingPageNumber) {
-                                        pageContentHeightVariable[`rm-page-content-general`] = `${calcContentHeight}px`;
-                                    }
-                                    else {
-                                        pageContentHeightVariable[`rm-page-content-${page}`] = `${calcContentHeight}px`;
-                                    }
-                                    if (maxContentHeight === undefined ||
-                                        calcContentHeight < maxContentHeight) {
-                                        maxContentHeight = calcContentHeight;
-                                    }
-                                }
-                                if (maxContentHeight) {
-                                    view.dom.style.setProperty(`--rm-max-content-child-height`, `${maxContentHeight - 10}px`);
-                                }
-                                Object.entries(pageContentHeightVariable).forEach(([k, v]) => {
-                                    view.dom.style.setProperty(`--${k}`, v);
-                                });
-                                refreshPage(view.dom);
-                                return;
-                            }
-                            // Need to update page count
-                            const triggerUpdate = () => {
+                            const triggerUpdate = (_footerHeight) => {
+                                if (isLocked())
+                                    return; // Double check
                                 requestAnimationFrame(() => {
-                                    const tr = view.state.tr.setMeta(page_count_meta_key, {});
+                                    if (isLocked())
+                                        return; // Triple check
+                                    const tr = view.state.tr.setMeta(page_count_meta_key, {
+                                        footerHeight: _footerHeight,
+                                    });
                                     view.dispatch(tr);
                                 });
                             };
-                            triggerUpdate();
+                            if (currentPageCount !== pageCount) {
+                                triggerUpdate();
+                                return;
+                            }
+                            // Stable - reset counter
+                            console.log(`✅ Stable at ${currentPageCount} pages`);
+                            resetIterations();
+                            const headerHeight = getHeaderHeight(view.dom, getCustomPages(this.options.customHeader, {}), "content");
+                            const footerHeight = getFooterHeight(view.dom, getCustomPages({}, this.options.customFooter), "content");
+                            const footerHeightForCurrentPages = new Map();
+                            for (let i = 0; i <= pageCount; i++) {
+                                if (footerHeight.has(i)) {
+                                    footerHeightForCurrentPages.set(i, footerHeight.get(i) || 0);
+                                }
+                            }
+                            const headerHeightForCurrentPages = new Map();
+                            for (let i = 0; i <= pageCount; i++) {
+                                if (headerHeight.has(i)) {
+                                    headerHeightForCurrentPages.set(i, headerHeight.get(i) || 0);
+                                }
+                            }
+                            const pagesSetToCheck = new Set([
+                                1,
+                                ...footerHeightForCurrentPages.keys(),
+                                ...headerHeightForCurrentPages.keys(),
+                            ]);
+                            let missingPageNumber = undefined;
+                            for (let i = 1; i <= pageCount; i++) {
+                                if (!pagesSetToCheck.has(i)) {
+                                    missingPageNumber = i;
+                                    break;
+                                }
+                            }
+                            if (missingPageNumber) {
+                                pagesSetToCheck.add(missingPageNumber);
+                            }
+                            pagesSetToCheck.delete(0);
+                            let pageContentHeightVariable = {};
+                            let maxContentHeight = undefined;
+                            for (const page of pagesSetToCheck) {
+                                const headerHeight = headerHeightForCurrentPages.has(page)
+                                    ? headerHeightForCurrentPages.get(page) || 0
+                                    : headerHeightForCurrentPages.get(0) || 0;
+                                const footerHeight = footerHeightForCurrentPages.has(page)
+                                    ? footerHeightForCurrentPages.get(page) || 0
+                                    : footerHeightForCurrentPages.get(0) || 0;
+                                const { _pageHeaderHeight, _pageHeight } = getHeight(this.options, headerHeight, footerHeight);
+                                const contentHeight = page === 1 ? _pageHeight + _pageHeaderHeight : _pageHeight;
+                                if (page === 1) {
+                                    pageContentHeightVariable[`rm-page-content-first`] = `${contentHeight}px`;
+                                }
+                                if (page === missingPageNumber) {
+                                    pageContentHeightVariable[`rm-page-content-general`] = `${contentHeight}px`;
+                                }
+                                else {
+                                    pageContentHeightVariable[`rm-page-content-${page}`] = `${contentHeight}px`;
+                                }
+                                if (maxContentHeight === undefined ||
+                                    contentHeight < maxContentHeight) {
+                                    maxContentHeight = contentHeight;
+                                }
+                            }
+                            if (maxContentHeight) {
+                                view.dom.style.setProperty(`--rm-max-content-child-height`, `${maxContentHeight - 10}px`);
+                            }
+                            Object.entries(pageContentHeightVariable).forEach(([key, value]) => {
+                                view.dom.style.setProperty(`--${key}`, value);
+                            });
+                            refreshPage(view.dom);
+                            return;
                         },
                     };
                 },
@@ -447,6 +436,8 @@ export const PaginationPlus = Extension.create({
                         return buildDecorations(state.doc);
                     },
                     apply(tr, old) {
+                        if (isLocked())
+                            return old;
                         if (tr.docChanged ||
                             tr.steps.some((step) => step instanceof ReplaceStep) ||
                             tr.steps.some((step) => step instanceof ReplaceAroundStep) ||
@@ -471,13 +462,12 @@ export const PaginationPlus = Extension.create({
     addCommands() {
         return {
             updatePageBreakBackground: (color) => () => {
+                forceUnlock();
                 this.options.pageBreakBackground = color;
                 return true;
             },
             updatePageSize: (size) => () => {
-                // Reset when page size changes
-                globalIterationCount = 0;
-                globalBaseContentHeight = 0;
+                forceUnlock();
                 this.options.pageHeight = size.pageHeight;
                 this.options.pageWidth = size.pageWidth;
                 this.options.marginTop = size.marginTop;
@@ -487,22 +477,22 @@ export const PaginationPlus = Extension.create({
                 return true;
             },
             updatePageWidth: (width) => () => {
-                globalIterationCount = 0;
-                globalBaseContentHeight = 0;
+                forceUnlock();
                 this.options.pageWidth = width;
                 return true;
             },
             updatePageHeight: (height) => () => {
-                globalIterationCount = 0;
-                globalBaseContentHeight = 0;
+                forceUnlock();
                 this.options.pageHeight = height;
                 return true;
             },
             updatePageGap: (gap) => () => {
+                forceUnlock();
                 this.options.pageGap = gap;
                 return true;
             },
             updateMargins: (margins) => () => {
+                forceUnlock();
                 this.options.marginTop = margins.top;
                 this.options.marginBottom = margins.bottom;
                 this.options.marginLeft = margins.left;
@@ -510,11 +500,13 @@ export const PaginationPlus = Extension.create({
                 return true;
             },
             updateContentMargins: (margins) => () => {
+                forceUnlock();
                 this.options.contentMarginTop = margins.top;
                 this.options.contentMarginBottom = margins.bottom;
                 return true;
             },
             updateHeaderContent: (left, right, center, pageNumber) => () => {
+                forceUnlock();
                 if (pageNumber) {
                     this.options.customHeader = Object.assign(Object.assign({}, this.options.customHeader), { [pageNumber]: {
                             headerLeft: left,
@@ -530,6 +522,7 @@ export const PaginationPlus = Extension.create({
                 return true;
             },
             updateFooterContent: (left, right, center, pageNumber) => () => {
+                forceUnlock();
                 if (pageNumber) {
                     this.options.customFooter = Object.assign(Object.assign({}, this.options.customFooter), { [pageNumber]: {
                             footerLeft: left,
@@ -554,6 +547,59 @@ const getExistingPageCount = (view) => {
         return paginationElement.children.length;
     }
     return 0;
+};
+const calculatePageCount = (view, pageOptions, headerHeight = 0, footerHeight = 0) => {
+    var _a;
+    // If locked, return current count
+    if (isLocked()) {
+        return getExistingPageCount(view);
+    }
+    const editorDom = view.dom;
+    const _pageHeaderHeight = pageOptions.contentMarginTop + pageOptions.marginTop + headerHeight;
+    const _pageFooterHeight = pageOptions.contentMarginBottom + pageOptions.marginBottom + footerHeight;
+    const pageContentAreaHeight = pageOptions.pageHeight - _pageHeaderHeight - _pageFooterHeight;
+    if (pageContentAreaHeight <= 50) {
+        console.warn("PaginationPlus: Page content area too small");
+        return 1;
+    }
+    const paginationElement = editorDom.querySelector("[data-rm-pagination]");
+    const currentPageCount = getExistingPageCount(view);
+    if (paginationElement) {
+        const lastElementOfEditor = editorDom.lastElementChild;
+        const lastPageBreak = (_a = paginationElement.lastElementChild) === null || _a === void 0 ? void 0 : _a.querySelector(".breaker");
+        if (lastElementOfEditor && lastPageBreak) {
+            const lastElementRect = lastElementOfEditor.getBoundingClientRect();
+            const lastPageBreakRect = lastPageBreak.getBoundingClientRect();
+            const lastPageGap = lastElementRect.bottom - lastPageBreakRect.bottom;
+            if (lastPageGap > 0) {
+                const addPage = Math.ceil(lastPageGap / pageContentAreaHeight);
+                const newPageCount = currentPageCount + addPage;
+                return newPageCount;
+            }
+            else {
+                const lpFrom = -10;
+                const lpTo = -(pageOptions.pageHeight - 10);
+                if (lastPageGap > lpTo && lastPageGap < lpFrom) {
+                    return currentPageCount;
+                }
+                else if (lastPageGap < lpTo) {
+                    const pageHeightOnRemove = pageOptions.pageHeight + pageOptions.pageGap;
+                    const removePage = Math.floor(lastPageGap / pageHeightOnRemove);
+                    return Math.max(1, currentPageCount + removePage);
+                }
+                else {
+                    return currentPageCount;
+                }
+            }
+        }
+        return 1;
+    }
+    else {
+        const editorHeight = editorDom.scrollHeight;
+        let pageCount = Math.ceil(editorHeight / pageContentAreaHeight);
+        pageCount = pageCount <= 0 ? 1 : pageCount;
+        return pageCount;
+    }
 };
 function createDecoration(pageOptions, headerHeightMap, footerHeightMap) {
     const commonHeaderOptions = {
@@ -620,11 +666,7 @@ function createDecoration(pageOptions, headerHeightMap, footerHeightMap) {
         const _headerHeight = headerHeightMap.get(0) || 0;
         const _footerHeight = footerHeightMap.get(0) || 0;
         const fragment = document.createDocumentFragment();
-        // Use base content height for page count calculation
-        const pageCount = globalBaseContentHeight > 0
-            ? calculatePageCountFromContent(globalBaseContentHeight, pageOptions)
-            : 1;
-        console.log(`🎨 Creating decorations for ${pageCount} pages (baseHeight: ${globalBaseContentHeight})`);
+        const pageCount = calculatePageCount(view, pageOptions);
         for (let i = 0; i < pageCount; i++) {
             const pageNumber = i + 1;
             const headerPageNumber = i + 2;
