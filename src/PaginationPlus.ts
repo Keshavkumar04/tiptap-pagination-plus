@@ -452,9 +452,6 @@ export const PaginationPlus = Extension.create<
                 Math.abs(pageCount - lastPageCount) <= 2 &&
                 this.storage.iterationCount > 10
               ) {
-                console.log(
-                  `PaginationPlus: Page count stabilized at ${currentPageCount} pages`
-                );
                 this.storage.iterationCount = 0; // Reset for next user action
                 return;
               }
@@ -471,7 +468,6 @@ export const PaginationPlus = Extension.create<
               };
 
               if (currentPageCount !== pageCount) {
-                console.log("We Need to create", pageCount, "pages");
                 triggerUpdate();
                 return;
               }
@@ -756,8 +752,6 @@ const calculatePageCount = (
   const paginationElement = editorDom.querySelector("[data-rm-pagination]");
   const currentPageCount = getExistingPageCount(view);
 
-  console.log("Page Height", pageOptions.pageHeight, pageContentAreaHeight);
-
   if (paginationElement) {
     const lastElementOfEditor = editorDom.lastElementChild;
     const lastPageBreak =
@@ -781,22 +775,18 @@ const calculatePageCount = (
           return Math.min(newPageCount, maxPages);
         }
 
-        console.log("Recalculate Page Count", true);
         return newPageCount;
       } else {
         const lpFrom = -10;
         const lpTo = -(pageOptions.pageHeight - 10);
         if (lastPageGap > lpTo && lastPageGap < lpFrom) {
-          console.log("Recalculate Page Count", false);
           return currentPageCount;
         } else if (lastPageGap < lpTo) {
           const pageHeightOnRemove =
             pageOptions.pageHeight + pageOptions.pageGap;
           const removePage = Math.floor(lastPageGap / pageHeightOnRemove);
-          console.log("Recalculate Page Count", true);
           return Math.max(1, currentPageCount + removePage); // NEW: Ensure at least 1 page
         } else {
-          console.log("Recalculate Page Count", false);
           return currentPageCount;
         }
       }
@@ -806,7 +796,6 @@ const calculatePageCount = (
     const editorHeight = editorDom.scrollHeight;
     let pageCount = Math.ceil(editorHeight / pageContentAreaHeight);
     pageCount = pageCount <= 0 ? 1 : pageCount;
-    console.log("returning pageCount", pageCount);
     return pageCount;
   }
 };
