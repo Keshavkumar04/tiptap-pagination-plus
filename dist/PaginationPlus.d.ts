@@ -29,14 +29,16 @@ export interface PaginationPlusStorage extends PaginationPlusOptions {
     headerHeight: HeaderHeightMap;
     footerHeight: FooterHeightMap;
     lastPageCount: number;
-    iterationCount: number;
+    stablePageCount: number;
+    updateCounter: number;
 }
 declare global {
     interface Window {
-        __paginationPlusLock?: {
-            isLocked: boolean;
-            lockTime: number;
-            iterationCount: number;
+        __paginationState?: {
+            stablePageCount: number;
+            lastDimensions: string;
+            updateCount: number;
+            isStabilizing: boolean;
         };
     }
 }
