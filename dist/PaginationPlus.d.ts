@@ -32,19 +32,11 @@ export interface PaginationPlusStorage extends PaginationPlusOptions {
 }
 declare global {
     interface Window {
-        __paginationDebug?: {
-            callCount: number;
-            lastCalculatedPageCount: number;
-            lastDimensions: {
-                width: number;
-                height: number;
-            };
-            history: Array<{
-                timestamp: number;
-                action: string;
-                pageCount: number;
-                details: any;
-            }>;
+        __pp_state?: {
+            updateCount: number;
+            lastUpdateTime: number;
+            locked: boolean;
+            currentPageCount: number;
         };
     }
 }
