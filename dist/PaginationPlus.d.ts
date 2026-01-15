@@ -38,9 +38,26 @@ declare global {
             locked: boolean;
             updateCount: number;
             dimensionsKey: string;
+            lastCalculationTime: number;
+            pendingRecalculation: boolean;
+            stableContentHeight: number | null;
+            orientationChangeInProgress: boolean;
         };
     }
 }
+declare function getState(): {
+    pageCount: number;
+    locked: boolean;
+    updateCount: number;
+    dimensionsKey: string;
+    lastCalculationTime: number;
+    pendingRecalculation: boolean;
+    stableContentHeight: number | null;
+    orientationChangeInProgress: boolean;
+};
+declare function resetState(): void;
+declare function lockForOrientationChange(duration?: number): void;
+export { resetState, lockForOrientationChange, getState as getPaginationState };
 declare module "@tiptap/core" {
     interface Commands<ReturnType> {
         PaginationPlus: {
@@ -61,6 +78,7 @@ declare module "@tiptap/core" {
             }) => ReturnType;
             updateHeaderContent: (left: string, right: string, center?: string, pageNumber?: PageNumber) => ReturnType;
             updateFooterContent: (left: string, right: string, center?: string, pageNumber?: PageNumber) => ReturnType;
+            prepareForOrientationChange: () => ReturnType;
         };
     }
     interface Storage {

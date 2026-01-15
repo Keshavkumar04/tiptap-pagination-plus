@@ -9,6 +9,10 @@ function getState() {
             locked: false,
             updateCount: 0,
             dimensionsKey: "",
+            lastCalculationTime: 0,
+            pendingRecalculation: false,
+            stableContentHeight: null,
+            orientationChangeInProgress: false,
         };
     }
     return window.__pp_state;
@@ -20,12 +24,33 @@ function resetState() {
         locked: false,
         updateCount: 0,
         dimensionsKey: "",
+        lastCalculationTime: 0,
+        pendingRecalculation: false,
+        stableContentHeight: null,
+        orientationChangeInProgress: false,
     };
 }
+// NEW: Lock state for orientation changes
+function lockForOrientationChange(duration = 300) {
+    const state = getState();
+    state.orientationChangeInProgress = true;
+    state.locked = true;
+    console.log("🔒 [PP] Locked for orientation change");
+    setTimeout(() => {
+        state.locked = false;
+        state.orientationChangeInProgress = false;
+        state.updateCount = 0;
+        console.log("🔓 [PP] Unlocked after orientation change");
+    }, duration);
+}
+// NEW: Export for external use
+export { resetState, lockForOrientationChange, getState as getPaginationState };
 // ============================================================================
 const page_count_meta_key = "PAGE_COUNT_META_KEY";
 const MAX_PAGES = 500;
-const MAX_UPDATES = 15;
+const MAX_UPDATES = 10; // Reduced from 15 to catch loops faster
+const MIN_CALCULATION_INTERVAL = 50; // Minimum ms between calculations
+const DIMENSION_CHANGE_LOCK_DURATION = 400; // ms to lock after dimension change
 const key = new PluginKey("brDecoration");
 function buildDecorations(doc) {
     const decorations = [];
@@ -77,42 +102,14 @@ const refreshPage = (targetNode) => {
 };
 const paginationKey = new PluginKey("pagination");
 // ============================================================================
-// PAGE CALCULATION WITH DEBUGGING
+// IMPROVED PAGE CALCULATION - STABLE VERSION
 // ============================================================================
-function calculatePageCount(view, pageOptions, headerHeight = 0, footerHeight = 0) {
-    const state = getState();
-    if (state.locked) {
-        return state.pageCount;
-    }
-    const currentDimKey = `${pageOptions.pageWidth}-${pageOptions.pageHeight}`;
-    if (state.dimensionsKey !== currentDimKey) {
-        console.log("📐 [PP] DIMENSIONS CHANGED:", {
-            from: state.dimensionsKey,
-            to: currentDimKey,
-        });
-        state.dimensionsKey = currentDimKey;
-        state.pageCount = 1;
-        state.updateCount = 0;
-    }
-    // Calculate content area per page
-    const _pageHeaderHeight = pageOptions.contentMarginTop + pageOptions.marginTop + headerHeight;
-    const _pageFooterHeight = pageOptions.contentMarginBottom + pageOptions.marginBottom + footerHeight;
-    const pageContentHeight = pageOptions.pageHeight - _pageHeaderHeight - _pageFooterHeight;
-    console.log("📏 [PP] Page metrics:", {
-        pageHeight: pageOptions.pageHeight,
-        pageWidth: pageOptions.pageWidth,
-        headerArea: _pageHeaderHeight,
-        footerArea: _pageFooterHeight,
-        CONTENT_AREA_PER_PAGE: pageContentHeight,
-    });
-    if (pageContentHeight <= 50) {
-        state.pageCount = 1;
-        return 1;
-    }
+/**
+ * Measure content height in a stable way that works during layout changes
+ */
+function measureContentHeightStable(view) {
     const editorDom = view.dom;
     const allChildren = Array.from(editorDom.children);
-    console.log("👀 [PP] Editor children:", allChildren.length);
-    // Find content elements
     const contentElements = [];
     for (const child of allChildren) {
         const el = child;
@@ -129,59 +126,142 @@ function calculatePageCount(view, pageOptions, headerHeight = 0, footerHeight = 
             contentElements.push(el);
         }
     }
-    console.log("📝 [PP] Content elements found:", contentElements.length);
     if (contentElements.length === 0) {
-        state.pageCount = 1;
-        return 1;
+        return 0;
     }
-    // Measure total content height - use actual content for tables
     let totalContentHeight = 0;
-    contentElements.forEach((el, index) => {
+    contentElements.forEach((el) => {
         let height = 0;
-        // For tableWrapper, measure the actual table rows, not the stretched container
+        // For tableWrapper, measure actual content, not the stretched container
         if (el.classList.contains("tableWrapper")) {
             const table = el.querySelector("table");
             if (table) {
-                // Sum up all row heights to get actual table content height
-                const rows = table.querySelectorAll("tr");
-                let tableHeight = 0;
-                rows.forEach((row) => {
-                    tableHeight += row.offsetHeight;
-                });
-                // Add padding for borders
-                height = tableHeight + 20;
-                console.log(`  [${index}] TABLE (${rows.length} rows): ${height}px (container: ${el.getBoundingClientRect().height}px)`);
+                // Use scrollHeight for more stable measurement
+                height = table.scrollHeight || table.offsetHeight;
+                // Add some padding for borders
+                height += 20;
             }
             else {
+                // Fallback: use minimum of scrollHeight and bounding rect
                 height = Math.min(el.scrollHeight, el.getBoundingClientRect().height);
-                console.log(`  [${index}] ${el.tagName}: ${height}px`);
             }
         }
         else {
-            height = el.getBoundingClientRect().height;
-            console.log(`  [${index}] ${el.tagName}: ${height}px`);
+            // For regular elements, prefer scrollHeight as it's more stable during reflow
+            const rect = el.getBoundingClientRect();
+            const scrollH = el.scrollHeight;
+            // Use scrollHeight if available and reasonable, otherwise use rect height
+            if (scrollH > 0 && scrollH < 10000) {
+                height = scrollH;
+            }
+            else if (rect.height > 0) {
+                height = rect.height;
+            }
         }
         totalContentHeight += height;
     });
+    return totalContentHeight;
+}
+function calculatePageCount(view, pageOptions, headerHeight = 0, footerHeight = 0) {
+    const state = getState();
+    const now = Date.now();
+    // If locked, return current page count
+    if (state.locked) {
+        console.log("🔒 [PP] Calculation blocked - state locked");
+        return state.pageCount;
+    }
+    // Throttle calculations to prevent rapid-fire updates
+    if (now - state.lastCalculationTime < MIN_CALCULATION_INTERVAL) {
+        console.log("⏱️ [PP] Calculation throttled");
+        return state.pageCount;
+    }
+    const currentDimKey = `${pageOptions.pageWidth}-${pageOptions.pageHeight}`;
+    // DIMENSION CHANGE DETECTION
+    if (state.dimensionsKey !== currentDimKey) {
+        console.log("📐 [PP] DIMENSIONS CHANGED:", {
+            from: state.dimensionsKey,
+            to: currentDimKey,
+        });
+        // Store old dimensions key
+        const oldDimKey = state.dimensionsKey;
+        state.dimensionsKey = currentDimKey;
+        state.updateCount = 0;
+        // If this is an orientation change (dimensions swapped), lock briefly
+        if (oldDimKey) {
+            const [oldW, oldH] = oldDimKey.split("-").map(Number);
+            const isOrientationChange = oldW === pageOptions.pageHeight && oldH === pageOptions.pageWidth;
+            if (isOrientationChange) {
+                console.log("🔄 [PP] Orientation change detected - locking");
+                lockForOrientationChange(DIMENSION_CHANGE_LOCK_DURATION);
+                return Math.max(1, state.pageCount); // Return current count during transition
+            }
+        }
+        // For non-orientation dimension changes, still add a brief delay
+        state.locked = true;
+        setTimeout(() => {
+            state.locked = false;
+            state.updateCount = 0;
+        }, 100);
+        return state.pageCount;
+    }
+    state.lastCalculationTime = now;
+    // Calculate content area per page
+    const _pageHeaderHeight = pageOptions.contentMarginTop + pageOptions.marginTop + headerHeight;
+    const _pageFooterHeight = pageOptions.contentMarginBottom + pageOptions.marginBottom + footerHeight;
+    const pageContentHeight = pageOptions.pageHeight - _pageHeaderHeight - _pageFooterHeight;
+    console.log("📏 [PP] Page metrics:", {
+        pageHeight: pageOptions.pageHeight,
+        pageWidth: pageOptions.pageWidth,
+        headerArea: _pageHeaderHeight,
+        footerArea: _pageFooterHeight,
+        CONTENT_AREA_PER_PAGE: pageContentHeight,
+    });
+    // Safety check for invalid page content height
+    if (pageContentHeight <= 50) {
+        console.warn("⚠️ [PP] Page content height too small:", pageContentHeight);
+        state.pageCount = 1;
+        return 1;
+    }
+    // Measure content height
+    const totalContentHeight = measureContentHeightStable(view);
     console.log("📊 [PP] TOTAL CONTENT HEIGHT:", totalContentHeight);
     if (totalContentHeight < 50) {
         state.pageCount = 1;
         return 1;
     }
-    // Calculate pages based on total content height
-    let pagesNeeded = Math.ceil(totalContentHeight / pageContentHeight);
-    console.log("🔢 [PP] Initial calculation:", {
-        totalContentHeight,
+    // Store stable content height for comparison
+    const previousStableHeight = state.stableContentHeight;
+    // Only update stable height if it's significantly different (>5% change)
+    // This prevents small measurement fluctuations from causing recalculations
+    if (previousStableHeight === null ||
+        Math.abs(totalContentHeight - previousStableHeight) / previousStableHeight >
+            0.05) {
+        state.stableContentHeight = totalContentHeight;
+    }
+    // Use stable height for calculation
+    const heightForCalculation = state.stableContentHeight || totalContentHeight;
+    // Calculate pages needed
+    let pagesNeeded = Math.ceil(heightForCalculation / pageContentHeight);
+    console.log("🔢 [PP] Page calculation:", {
+        contentHeight: heightForCalculation,
         pageContentHeight,
         PAGES_NEEDED: pagesNeeded,
     });
+    // Clamp to valid range
     pagesNeeded = Math.max(1, Math.min(pagesNeeded, MAX_PAGES));
-    // Get current page count for comparison
+    // Stability check: if page count is oscillating, stabilize
     const currentPageCount = getExistingPageCount(view);
-    console.log("📄 [PP] Current pages in DOM:", currentPageCount);
-    // Simple approach: trust the content height calculation
-    // Don't use overflow check because getBoundingClientRect() gives wrong values
-    // when table containers stretch to fill page space
+    if (Math.abs(pagesNeeded - currentPageCount) > 1 && state.updateCount > 3) {
+        // Page count is jumping by more than 1 after multiple updates
+        // This indicates instability - take the average and lock
+        console.warn("⚠️ [PP] Unstable page count detected, stabilizing");
+        pagesNeeded = Math.ceil((pagesNeeded + currentPageCount) / 2);
+        state.locked = true;
+        setTimeout(() => {
+            state.locked = false;
+            state.updateCount = 0;
+        }, 300);
+    }
     console.log("🎯 [PP] FINAL PAGE COUNT:", pagesNeeded);
     state.pageCount = pagesNeeded;
     return pagesNeeded;
@@ -237,8 +317,16 @@ export const PaginationPlus = Extension.create({
       `;
             document.head.appendChild(style);
         }
-        refreshPage(targetNode);
-        this.storage.initialized = true;
+        // Delay initial refresh to let DOM settle
+        setTimeout(() => {
+            refreshPage(targetNode);
+            this.storage.initialized = true;
+        }, 100);
+    },
+    onDestroy() {
+        console.log("💀 [PP] Extension DESTROYED");
+        // Clean up state on destroy
+        resetState();
     },
     addProseMirrorPlugins() {
         const editor = this.editor;
@@ -255,8 +343,10 @@ export const PaginationPlus = Extension.create({
                     },
                     apply: (tr, oldDeco, oldState, newState) => {
                         const ppState = getState();
-                        if (ppState.locked)
+                        // Block updates when locked or during orientation change
+                        if (ppState.locked || ppState.orientationChangeInProgress) {
                             return oldDeco;
+                        }
                         const currentPageCount = getExistingPageCount(editor.view);
                         const calculatedPageCount = calculatePageCount(editor.view, extensionThis.options);
                         const settingsChanged = extensionThis.storage.pageHeight !==
@@ -268,12 +358,13 @@ export const PaginationPlus = Extension.create({
                             ppState.updateCount++;
                             console.log(`🔄 [PP] Update #${ppState.updateCount}: ${currentPageCount} → ${calculatedPageCount}`);
                             if (ppState.updateCount > MAX_UPDATES) {
-                                console.warn(`⛔ [PP] LOCKED at ${calculatedPageCount} pages`);
+                                console.warn(`⛔ [PP] LOCKED at ${calculatedPageCount} pages after ${MAX_UPDATES} updates`);
                                 ppState.locked = true;
+                                ppState.stableContentHeight = null; // Reset stable height
                                 setTimeout(() => {
                                     ppState.locked = false;
                                     ppState.updateCount = 0;
-                                    console.log("🔓 [PP] UNLOCKED");
+                                    console.log("🔓 [PP] UNLOCKED after timeout");
                                 }, 500);
                                 return oldDeco;
                             }
@@ -296,7 +387,7 @@ export const PaginationPlus = Extension.create({
                 view: () => ({
                     update: (view) => {
                         const ppState = getState();
-                        if (ppState.locked)
+                        if (ppState.locked || ppState.orientationChangeInProgress)
                             return;
                         const currentPageCount = getExistingPageCount(view);
                         const calculatedPageCount = calculatePageCount(view, extensionThis.options);
@@ -310,14 +401,18 @@ export const PaginationPlus = Extension.create({
                                 }, 500);
                                 return;
                             }
+                            // Use double requestAnimationFrame for more stable timing
                             requestAnimationFrame(() => {
-                                if (!ppState.locked && !view.isDestroyed) {
-                                    const tr = view.state.tr.setMeta(page_count_meta_key, {});
-                                    view.dispatch(tr);
-                                }
+                                requestAnimationFrame(() => {
+                                    if (!ppState.locked && !view.isDestroyed) {
+                                        const tr = view.state.tr.setMeta(page_count_meta_key, {});
+                                        view.dispatch(tr);
+                                    }
+                                });
                             });
                             return;
                         }
+                        // Reset update count when stable
                         ppState.updateCount = 0;
                         refreshPage(view.dom);
                     },
@@ -330,7 +425,8 @@ export const PaginationPlus = Extension.create({
                         return buildDecorations(state.doc);
                     },
                     apply(tr, old) {
-                        if (getState().locked)
+                        const ppState = getState();
+                        if (ppState.locked || ppState.orientationChangeInProgress)
                             return old;
                         if (tr.docChanged)
                             return buildDecorations(tr.doc);
@@ -354,7 +450,7 @@ export const PaginationPlus = Extension.create({
             },
             updatePageSize: (size) => () => {
                 console.log("📐 [PP] updatePageSize:", size);
-                resetState();
+                lockForOrientationChange(DIMENSION_CHANGE_LOCK_DURATION);
                 this.options.pageHeight = size.pageHeight;
                 this.options.pageWidth = size.pageWidth;
                 this.options.marginTop = size.marginTop;
@@ -365,13 +461,30 @@ export const PaginationPlus = Extension.create({
             },
             updatePageWidth: (width) => () => {
                 console.log("📐 [PP] updatePageWidth:", width);
-                resetState();
+                const state = getState();
+                const oldWidth = this.options.pageWidth;
+                // Check if this might be an orientation change
+                if (Math.abs(width - this.options.pageHeight) < 10) {
+                    lockForOrientationChange(DIMENSION_CHANGE_LOCK_DURATION);
+                }
+                else {
+                    state.dimensionsKey = ""; // Force recalculation
+                    state.updateCount = 0;
+                }
                 this.options.pageWidth = width;
                 return true;
             },
             updatePageHeight: (height) => () => {
                 console.log("📐 [PP] updatePageHeight:", height);
-                resetState();
+                const state = getState();
+                // Check if this might be an orientation change
+                if (Math.abs(height - this.options.pageWidth) < 10) {
+                    lockForOrientationChange(DIMENSION_CHANGE_LOCK_DURATION);
+                }
+                else {
+                    state.dimensionsKey = ""; // Force recalculation
+                    state.updateCount = 0;
+                }
                 this.options.pageHeight = height;
                 return true;
             },
@@ -380,7 +493,9 @@ export const PaginationPlus = Extension.create({
                 return true;
             },
             updateMargins: (m) => () => {
-                resetState();
+                const state = getState();
+                state.dimensionsKey = ""; // Force recalculation
+                state.updateCount = 0;
                 this.options.marginTop = m.top;
                 this.options.marginBottom = m.bottom;
                 this.options.marginLeft = m.left;
@@ -420,6 +535,11 @@ export const PaginationPlus = Extension.create({
                     this.options.footerRight = right;
                     this.options.footerCenter = center || "";
                 }
+                return true;
+            },
+            // NEW: Command to prepare for orientation change
+            prepareForOrientationChange: () => () => {
+                lockForOrientationChange(DIMENSION_CHANGE_LOCK_DURATION);
                 return true;
             },
         };
