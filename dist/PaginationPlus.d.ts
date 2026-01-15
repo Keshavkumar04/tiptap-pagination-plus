@@ -37,7 +37,7 @@ declare global {
             pageCount: number;
             locked: boolean;
             updateCount: number;
-            lastDimensions: string;
+            dimensionsKey: string;
         };
     }
 }

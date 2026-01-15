@@ -66,7 +66,7 @@ export interface PaginationPlusStorage extends PaginationPlusOptions {
 }
 
 // ============================================================================
-// GLOBAL STATE - Persists across React re-renders
+// GLOBAL STATE
 // ============================================================================
 declare global {
   interface Window {
@@ -74,7 +74,7 @@ declare global {
       pageCount: number;
       locked: boolean;
       updateCount: number;
-      lastDimensions: string;
+      dimensionsKey: string;
     };
   }
 }
@@ -85,7 +85,7 @@ function getState() {
       pageCount: 1,
       locked: false,
       updateCount: 0,
-      lastDimensions: "",
+      dimensionsKey: "",
     };
   }
   return window.__pp_state;
@@ -96,15 +96,15 @@ function resetState() {
     pageCount: 1,
     locked: false,
     updateCount: 0,
-    lastDimensions: "",
+    dimensionsKey: "",
   };
 }
 
 // ============================================================================
 
 const page_count_meta_key = "PAGE_COUNT_META_KEY";
-const MAX_PAGES = 100;
-const MAX_UPDATES = 10;
+const MAX_PAGES = 500;
+const MAX_UPDATES = 15;
 
 declare module "@tiptap/core" {
   interface Commands<ReturnType> {
@@ -200,8 +200,9 @@ const refreshPage = (targetNode: HTMLElement) => {
 const paginationKey = new PluginKey("pagination");
 
 // ============================================================================
-// IMPROVED PAGE CALCULATION
-// Uses the actual content from ProseMirror, not DOM measurements
+// FIXED PAGE CALCULATION - V2
+// The key fix: Only measure actual content elements, ignoring ALL pagination
+// decorations. Use getBoundingClientRect for accurate measurements.
 // ============================================================================
 function calculatePageCount(
   view: EditorView,
@@ -211,9 +212,16 @@ function calculatePageCount(
 ): number {
   const state = getState();
 
-  // If locked, return current count
   if (state.locked) {
     return state.pageCount;
+  }
+
+  // Check if dimensions changed
+  const currentDimKey = `${pageOptions.pageWidth}-${pageOptions.pageHeight}`;
+  if (state.dimensionsKey !== currentDimKey) {
+    state.dimensionsKey = currentDimKey;
+    state.pageCount = 1;
+    state.updateCount = 0;
   }
 
   // Calculate content area per page
@@ -230,103 +238,105 @@ function calculatePageCount(
   }
 
   const editorDom = view.dom;
-  const paginationElement = editorDom.querySelector("[data-rm-pagination]");
 
-  if (!paginationElement) {
-    // No pagination yet - estimate based on actual content
-    // Get all direct children except pagination elements
-    let contentHeight = 0;
-    const children = Array.from(editorDom.children);
-
-    for (const child of children) {
-      const el = child as HTMLElement;
-      // Skip pagination-related elements
-      if (
-        el.id === "pages" ||
-        el.classList.contains("rm-pages-wrapper") ||
-        el.classList.contains("rm-first-page-header") ||
-        el.hasAttribute("data-rm-pagination")
-      ) {
-        continue;
-      }
-      contentHeight += el.offsetHeight || 0;
-    }
-
-    // For empty/near-empty documents, return 1
-    if (contentHeight < 50) {
-      state.pageCount = 1;
-      return 1;
-    }
-
-    const estimated = Math.max(1, Math.ceil(contentHeight / pageContentHeight));
-    state.pageCount = Math.min(estimated, MAX_PAGES);
-    return state.pageCount;
-  }
-
-  // Pagination exists - check if content overflows
-  const currentPageCount = paginationElement.children.length;
-  const lastPageBreak =
-    paginationElement.lastElementChild?.querySelector(".breaker");
-
-  if (!lastPageBreak) {
-    state.pageCount = currentPageCount || 1;
-    return state.pageCount;
-  }
-
-  // Find the last actual content element (not pagination)
-  let lastContentElement: HTMLElement | null = null;
+  // =========================================================================
+  // Get actual content elements (exclude ALL pagination elements)
+  // =========================================================================
+  const contentElements: HTMLElement[] = [];
   const children = Array.from(editorDom.children);
 
-  for (let i = children.length - 1; i >= 0; i--) {
-    const el = children[i] as HTMLElement;
+  for (const child of children) {
+    const el = child as HTMLElement;
+    // Skip ALL pagination-related elements by checking multiple conditions
     if (
-      el.id !== "pages" &&
-      !el.classList.contains("rm-pages-wrapper") &&
-      !el.classList.contains("rm-first-page-header") &&
-      !el.hasAttribute("data-rm-pagination")
+      el.id === "pages" ||
+      el.classList.contains("rm-pages-wrapper") ||
+      el.classList.contains("rm-first-page-header") ||
+      el.classList.contains("rm-page-header") ||
+      el.classList.contains("rm-page-footer") ||
+      el.classList.contains("rm-page-break") ||
+      el.classList.contains("breaker") ||
+      el.classList.contains("rm-pagination-gap") ||
+      el.hasAttribute("data-rm-pagination") ||
+      el.closest("[data-rm-pagination]") !== null
     ) {
-      lastContentElement = el;
-      break;
+      continue;
     }
+    contentElements.push(el);
   }
 
-  if (!lastContentElement) {
-    // No content - just 1 page
+  // If no content elements, return 1 page
+  if (contentElements.length === 0) {
     state.pageCount = 1;
     return 1;
   }
 
-  const lastContentRect = lastContentElement.getBoundingClientRect();
-  const lastPageBreakRect = lastPageBreak.getBoundingClientRect();
-  const overflow = lastContentRect.bottom - lastPageBreakRect.bottom;
+  // Measure total content height using bounding rects
+  let totalContentHeight = 0;
+  for (const el of contentElements) {
+    const rect = el.getBoundingClientRect();
+    totalContentHeight += rect.height;
+  }
 
-  if (overflow > 10) {
-    // Content overflows - add pages
-    const additionalPages = Math.ceil(overflow / pageContentHeight);
-    const newCount = Math.min(currentPageCount + additionalPages, MAX_PAGES);
-    state.pageCount = newCount;
-    return newCount;
-  } else if (
-    overflow < -(pageContentHeight + pageOptions.pageGap) &&
-    currentPageCount > 1
-  ) {
-    // Content has significant empty space - maybe reduce pages
-    // Only reduce if we have MORE than one full page of empty space
-    const emptySpace = Math.abs(overflow);
-    const pagesToRemove = Math.floor(
-      emptySpace / (pageContentHeight + pageOptions.pageGap)
-    );
+  // For minimal content, use 1 page
+  if (totalContentHeight < 50) {
+    state.pageCount = 1;
+    return 1;
+  }
 
-    if (pagesToRemove > 0) {
-      const newCount = Math.max(1, currentPageCount - pagesToRemove);
-      state.pageCount = newCount;
-      return newCount;
+  // Calculate initial estimate
+  let pagesNeeded = Math.ceil(totalContentHeight / pageContentHeight);
+  pagesNeeded = Math.max(1, Math.min(pagesNeeded, MAX_PAGES));
+
+  // =========================================================================
+  // STABILITY: Check actual overflow with current pagination
+  // =========================================================================
+  const currentPageCount = getExistingPageCount(view);
+  const paginationElement = editorDom.querySelector("[data-rm-pagination]");
+
+  if (paginationElement && currentPageCount > 0 && contentElements.length > 0) {
+    const lastPageBreak =
+      paginationElement.lastElementChild?.querySelector(".breaker");
+
+    if (lastPageBreak) {
+      const lastContent = contentElements[contentElements.length - 1];
+      const lastContentRect = lastContent.getBoundingClientRect();
+      const lastBreakRect = lastPageBreak.getBoundingClientRect();
+
+      const overflow = lastContentRect.bottom - lastBreakRect.bottom;
+
+      if (overflow > 20) {
+        // Content overflows - add more pages
+        const additionalPages = Math.ceil(overflow / pageContentHeight);
+        pagesNeeded = Math.min(currentPageCount + additionalPages, MAX_PAGES);
+      } else if (overflow >= -50) {
+        // Content fits well - keep current count
+        pagesNeeded = currentPageCount;
+      } else if (
+        overflow < -(pageContentHeight + pageOptions.pageGap) &&
+        currentPageCount > 1
+      ) {
+        // Significant empty space - reduce pages conservatively
+        const emptySpace = Math.abs(overflow);
+        const emptyPages = Math.floor(
+          emptySpace / (pageContentHeight + pageOptions.pageGap)
+        );
+
+        // Only reduce if we have 2+ empty pages to avoid oscillation
+        if (emptyPages >= 2) {
+          pagesNeeded = Math.max(1, currentPageCount - (emptyPages - 1));
+        } else {
+          pagesNeeded = currentPageCount;
+        }
+      } else {
+        // Keep current
+        pagesNeeded = currentPageCount;
+      }
     }
   }
 
-  // Content fits properly
-  state.pageCount = currentPageCount;
-  return currentPageCount;
+  state.pageCount = pagesNeeded;
+  return pagesNeeded;
 }
 
 // ============================================================================
@@ -531,7 +541,6 @@ export const PaginationPlus = Extension.create<
               extensionThis.options
             );
 
-            // Check if settings changed
             const settingsChanged =
               extensionThis.storage.pageHeight !==
                 extensionThis.options.pageHeight ||
@@ -566,7 +575,7 @@ export const PaginationPlus = Extension.create<
                 setTimeout(() => {
                   ppState.locked = false;
                   ppState.updateCount = 0;
-                }, 1000);
+                }, 500);
                 return oldDeco;
               }
 
@@ -623,7 +632,7 @@ export const PaginationPlus = Extension.create<
                   setTimeout(() => {
                     ppState.locked = false;
                     ppState.updateCount = 0;
-                  }, 1000);
+                  }, 500);
                   return;
                 }
 
@@ -636,10 +645,8 @@ export const PaginationPlus = Extension.create<
                 return;
               }
 
-              // Stable - reset counter
               ppState.updateCount = 0;
 
-              // Update CSS variables for content heights
               const headerHeight = getHeaderHeight(
                 view.dom,
                 getCustomPages(extensionThis.options.customHeader, {}),
@@ -883,7 +890,6 @@ function createDecoration(
   footerHeightMap: FooterHeightMap,
   pageCount: number
 ): Decoration[] {
-  // Ensure at least 1 page, max MAX_PAGES
   const safePageCount = Math.max(1, Math.min(pageCount, MAX_PAGES));
 
   const commonHeaderOptions: HeaderOptions = {
