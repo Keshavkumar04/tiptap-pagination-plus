@@ -127,11 +127,7 @@ function calculatePageCount(view, pageOptions, headerHeight = 0, footerHeight = 
             el.classList.contains("rm-pagination-gap") ||
             el.hasAttribute("data-rm-pagination");
         if (!isPaginationElement) {
-            console.log("  ✅ Content:", el.tagName, el.className, "height:", el.getBoundingClientRect().height);
             contentElements.push(el);
-        }
-        else {
-            console.log("  ❌ Pagination:", el.tagName, el.className || el.id);
         }
     }
     console.log("📝 [PP] Content elements found:", contentElements.length);
@@ -139,12 +135,34 @@ function calculatePageCount(view, pageOptions, headerHeight = 0, footerHeight = 
         state.pageCount = 1;
         return 1;
     }
-    // Measure total content height
+    // Measure total content height - use actual content for tables
     let totalContentHeight = 0;
     contentElements.forEach((el, index) => {
-        const rect = el.getBoundingClientRect();
-        console.log(`  [${index}] ${el.tagName}: ${rect.height}px`);
-        totalContentHeight += rect.height;
+        let height = 0;
+        // For tableWrapper, measure the actual table rows, not the stretched container
+        if (el.classList.contains("tableWrapper")) {
+            const table = el.querySelector("table");
+            if (table) {
+                // Sum up all row heights to get actual table content height
+                const rows = table.querySelectorAll("tr");
+                let tableHeight = 0;
+                rows.forEach((row) => {
+                    tableHeight += row.offsetHeight;
+                });
+                // Add padding for borders
+                height = tableHeight + 20;
+                console.log(`  [${index}] TABLE (${rows.length} rows): ${height}px (container: ${el.getBoundingClientRect().height}px)`);
+            }
+            else {
+                height = Math.min(el.scrollHeight, el.getBoundingClientRect().height);
+                console.log(`  [${index}] ${el.tagName}: ${height}px`);
+            }
+        }
+        else {
+            height = el.getBoundingClientRect().height;
+            console.log(`  [${index}] ${el.tagName}: ${height}px`);
+        }
+        totalContentHeight += height;
     });
     console.log("📊 [PP] TOTAL CONTENT HEIGHT:", totalContentHeight);
     if (totalContentHeight < 50) {
