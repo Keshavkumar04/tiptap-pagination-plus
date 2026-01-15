@@ -62,22 +62,19 @@ export interface PaginationPlusStorage extends PaginationPlusOptions {
   headerHeight: HeaderHeightMap;
   footerHeight: FooterHeightMap;
   lastPageCount: number;
+  initialized: boolean;
 }
 
 // ============================================================================
-// HARD LIMITS - These cannot be exceeded
+// GLOBAL STATE - Persists across React re-renders
 // ============================================================================
-const MAX_PAGES = 20; // Hard cap - no document should have more than this during editing
-const MAX_UPDATES_PER_CYCLE = 5; // Max updates before we stop
-
-// Global state on window to persist across everything
 declare global {
   interface Window {
     __pp_state?: {
-      updateCount: number;
-      lastUpdateTime: number;
+      pageCount: number;
       locked: boolean;
-      currentPageCount: number;
+      updateCount: number;
+      lastDimensions: string;
     };
   }
 }
@@ -85,28 +82,29 @@ declare global {
 function getState() {
   if (!window.__pp_state) {
     window.__pp_state = {
-      updateCount: 0,
-      lastUpdateTime: 0,
+      pageCount: 1,
       locked: false,
-      currentPageCount: 1,
+      updateCount: 0,
+      lastDimensions: "",
     };
   }
   return window.__pp_state;
 }
 
 function resetState() {
-  console.log("🔄 PP: Resetting state");
   window.__pp_state = {
-    updateCount: 0,
-    lastUpdateTime: Date.now(),
+    pageCount: 1,
     locked: false,
-    currentPageCount: 1,
+    updateCount: 0,
+    lastDimensions: "",
   };
 }
 
 // ============================================================================
 
 const page_count_meta_key = "PAGE_COUNT_META_KEY";
+const MAX_PAGES = 100;
+const MAX_UPDATES = 10;
 
 declare module "@tiptap/core" {
   interface Commands<ReturnType> {
@@ -202,93 +200,133 @@ const refreshPage = (targetNode: HTMLElement) => {
 const paginationKey = new PluginKey("pagination");
 
 // ============================================================================
-// SIMPLE PAGE CALCULATION - No recursion, hard capped
+// IMPROVED PAGE CALCULATION
+// Uses the actual content from ProseMirror, not DOM measurements
 // ============================================================================
-function simpleCalculatePageCount(
-  editorDom: HTMLElement,
-  pageOptions: PaginationPlusOptions
+function calculatePageCount(
+  view: EditorView,
+  pageOptions: PaginationPlusOptions,
+  headerHeight: number = 0,
+  footerHeight: number = 0
 ): number {
   const state = getState();
 
   // If locked, return current count
   if (state.locked) {
-    console.log("🔒 PP: Locked, returning", state.currentPageCount);
-    return state.currentPageCount;
+    return state.pageCount;
   }
 
-  // Increment update count
-  state.updateCount++;
+  // Calculate content area per page
+  const _pageHeaderHeight =
+    pageOptions.contentMarginTop + pageOptions.marginTop + headerHeight;
+  const _pageFooterHeight =
+    pageOptions.contentMarginBottom + pageOptions.marginBottom + footerHeight;
+  const pageContentHeight =
+    pageOptions.pageHeight - _pageHeaderHeight - _pageFooterHeight;
 
-  // If too many updates, lock and return
-  if (state.updateCount > MAX_UPDATES_PER_CYCLE) {
-    console.warn("⚠️ PP: Too many updates, locking at", state.currentPageCount);
-    state.locked = true;
-    // Auto-unlock after 2 seconds
-    setTimeout(() => {
-      console.log("🔓 PP: Auto-unlocking");
-      state.locked = false;
-      state.updateCount = 0;
-    }, 2000);
-    return state.currentPageCount;
-  }
-
-  // Calculate available content height per page
-  const margins =
-    pageOptions.marginTop +
-    pageOptions.marginBottom +
-    pageOptions.contentMarginTop +
-    pageOptions.contentMarginBottom;
-  const contentHeightPerPage = pageOptions.pageHeight - margins;
-
-  console.log("📏 PP: Calculating pages", {
-    pageHeight: pageOptions.pageHeight,
-    pageWidth: pageOptions.pageWidth,
-    margins,
-    contentHeightPerPage,
-    updateCount: state.updateCount,
-  });
-
-  if (contentHeightPerPage <= 50) {
-    console.error("❌ PP: Content height too small:", contentHeightPerPage);
-    state.currentPageCount = 1;
+  if (pageContentHeight <= 50) {
+    state.pageCount = 1;
     return 1;
   }
 
-  // Get actual content height (excluding pagination elements)
-  let contentHeight = 0;
-  const children = editorDom.children;
+  const editorDom = view.dom;
+  const paginationElement = editorDom.querySelector("[data-rm-pagination]");
 
-  for (let i = 0; i < children.length; i++) {
-    const child = children[i] as HTMLElement;
-    // Skip pagination wrapper
-    if (
-      child.id === "pages" ||
-      child.classList.contains("rm-pages-wrapper") ||
-      child.classList.contains("rm-first-page-header")
-    ) {
-      continue;
+  if (!paginationElement) {
+    // No pagination yet - estimate based on actual content
+    // Get all direct children except pagination elements
+    let contentHeight = 0;
+    const children = Array.from(editorDom.children);
+
+    for (const child of children) {
+      const el = child as HTMLElement;
+      // Skip pagination-related elements
+      if (
+        el.id === "pages" ||
+        el.classList.contains("rm-pages-wrapper") ||
+        el.classList.contains("rm-first-page-header") ||
+        el.hasAttribute("data-rm-pagination")
+      ) {
+        continue;
+      }
+      contentHeight += el.offsetHeight || 0;
     }
-    contentHeight += child.offsetHeight;
+
+    // For empty/near-empty documents, return 1
+    if (contentHeight < 50) {
+      state.pageCount = 1;
+      return 1;
+    }
+
+    const estimated = Math.max(1, Math.ceil(contentHeight / pageContentHeight));
+    state.pageCount = Math.min(estimated, MAX_PAGES);
+    return state.pageCount;
   }
 
-  console.log("📐 PP: Content measurement", {
-    contentHeight,
-    childCount: children.length,
-  });
+  // Pagination exists - check if content overflows
+  const currentPageCount = paginationElement.children.length;
+  const lastPageBreak =
+    paginationElement.lastElementChild?.querySelector(".breaker");
 
-  // Simple calculation
-  let pageCount = Math.ceil(contentHeight / contentHeightPerPage);
-  pageCount = Math.max(1, pageCount);
-
-  // HARD CAP
-  if (pageCount > MAX_PAGES) {
-    console.warn(`⚠️ PP: Capping pages from ${pageCount} to ${MAX_PAGES}`);
-    pageCount = MAX_PAGES;
+  if (!lastPageBreak) {
+    state.pageCount = currentPageCount || 1;
+    return state.pageCount;
   }
 
-  console.log("📄 PP: Final page count:", pageCount);
-  state.currentPageCount = pageCount;
-  return pageCount;
+  // Find the last actual content element (not pagination)
+  let lastContentElement: HTMLElement | null = null;
+  const children = Array.from(editorDom.children);
+
+  for (let i = children.length - 1; i >= 0; i--) {
+    const el = children[i] as HTMLElement;
+    if (
+      el.id !== "pages" &&
+      !el.classList.contains("rm-pages-wrapper") &&
+      !el.classList.contains("rm-first-page-header") &&
+      !el.hasAttribute("data-rm-pagination")
+    ) {
+      lastContentElement = el;
+      break;
+    }
+  }
+
+  if (!lastContentElement) {
+    // No content - just 1 page
+    state.pageCount = 1;
+    return 1;
+  }
+
+  const lastContentRect = lastContentElement.getBoundingClientRect();
+  const lastPageBreakRect = lastPageBreak.getBoundingClientRect();
+  const overflow = lastContentRect.bottom - lastPageBreakRect.bottom;
+
+  if (overflow > 10) {
+    // Content overflows - add pages
+    const additionalPages = Math.ceil(overflow / pageContentHeight);
+    const newCount = Math.min(currentPageCount + additionalPages, MAX_PAGES);
+    state.pageCount = newCount;
+    return newCount;
+  } else if (
+    overflow < -(pageContentHeight + pageOptions.pageGap) &&
+    currentPageCount > 1
+  ) {
+    // Content has significant empty space - maybe reduce pages
+    // Only reduce if we have MORE than one full page of empty space
+    const emptySpace = Math.abs(overflow);
+    const pagesToRemove = Math.floor(
+      emptySpace / (pageContentHeight + pageOptions.pageGap)
+    );
+
+    if (pagesToRemove > 0) {
+      const newCount = Math.max(1, currentPageCount - pagesToRemove);
+      state.pageCount = newCount;
+      return newCount;
+    }
+  }
+
+  // Content fits properly
+  state.pageCount = currentPageCount;
+  return currentPageCount;
 }
 
 // ============================================================================
@@ -306,15 +344,11 @@ export const PaginationPlus = Extension.create<
       ...defaultOptions,
       headerHeight: new Map(),
       footerHeight: new Map(),
-      lastPageCount: 0,
+      lastPageCount: 1,
+      initialized: false,
     };
   },
   onCreate() {
-    console.log("🚀 PP: Extension created", {
-      pageWidth: this.options.pageWidth,
-      pageHeight: this.options.pageHeight,
-    });
-
     resetState();
 
     const targetNode = this.editor.view.dom;
@@ -326,135 +360,137 @@ export const PaginationPlus = Extension.create<
 
     updateCssVariables(targetNode, this.options);
 
-    // Add styles
+    // Add styles (only once)
     const existingStyle = document.querySelector("[data-rm-pagination-style]");
-    if (existingStyle) existingStyle.remove();
+    if (!existingStyle) {
+      const style = document.createElement("style");
+      style.dataset.rmPaginationStyle = "";
+      style.textContent = `
+        .rm-pagination-gap{
+          border-top: 1px solid;
+          border-bottom: 1px solid;
+          border-color: var(--rm-page-gap-border-color);
+        }
+        .rm-with-pagination,
+        .rm-with-pagination .rm-first-page-header {
+          counter-reset: page-number page-number-plus 1;
+        }
+        .rm-with-pagination .image-plus-wrapper,
+        .rm-with-pagination .table-plus td,
+        .rm-with-pagination .table-plus th {
+          max-height: var(--rm-max-content-child-height);
+          overflow-y: auto;
+        }
+        .rm-with-pagination .image-plus-wrapper {
+          overflow-y: visible;
+        }
+        .rm-with-pagination .rm-page-break {
+          counter-increment: page-number page-number-plus;
+        }
+        .rm-with-pagination .rm-page-break:last-child .rm-pagination-gap {
+          display: none;
+        }
+        .rm-with-pagination .rm-page-break:last-child .rm-page-header {
+          display: none;
+        }
+        .rm-with-pagination table tr td,
+        .rm-with-pagination table tr th {
+          word-break: break-all;
+        }
+        .rm-with-pagination table > tr {
+          display: grid;
+          min-width: 100%;
+        }
+        .rm-with-pagination table {
+          border-collapse: collapse;
+          width: 100%;
+          display: contents;
+        }
+        .rm-with-pagination table tbody{
+          display: table;
+          max-height: 300px;
+          overflow-y: auto;
+        }
+        .rm-with-pagination table tbody > tr{
+          display: table-row !important;
+        }
+        .rm-with-pagination *:has(>br.ProseMirror-trailingBreak:only-child) {
+          display: table;
+          width: 100%;
+        }
+        .rm-with-pagination .rm-br-decoration {
+          display: table;
+          width: 100%;
+        }
+        .rm-with-pagination .table-row-group {
+          max-height: var(--rm-max-content-child-height);
+          overflow-y: auto;
+          width: 100%;
+        }
+        .rm-with-pagination .rm-page-footer-left,
+        .rm-with-pagination .rm-page-footer-right,
+        .rm-with-pagination .rm-page-footer-center,
+        .rm-with-pagination .rm-page-header-left,
+        .rm-with-pagination .rm-page-header-right,
+        .rm-with-pagination .rm-page-header-center {
+          display: inline-block;
+        }
+        .rm-with-pagination .rm-page-header-left,
+        .rm-with-pagination .rm-page-footer-left{
+          float: left;
+          margin-left: var(--rm-margin-left);
+        }
+        .rm-with-pagination .rm-page-header-right,
+        .rm-with-pagination .rm-page-footer-right{
+          float: right;
+          margin-right: var(--rm-margin-right);
+        }
+        .rm-with-pagination .rm-page-header-center,
+        .rm-with-pagination .rm-page-footer-center{
+          position: absolute;
+          left: 50%;
+          transform: translateX(-50%);
+        }
+        .rm-with-pagination .rm-first-page-header .rm-page-header-right{
+          margin-right: 0px !important;
+        }
+        .rm-with-pagination .rm-first-page-header .rm-page-header-left{
+          margin-left: 0px !important;
+        }
+        .rm-with-pagination .rm-page-number::before {
+          content: counter(page-number);
+        }
+        .rm-with-pagination .rm-page-number-plus::before {
+          content: counter(page-number-plus);
+        }
+        .rm-with-pagination .rm-page-header,
+        .rm-with-pagination .rm-page-footer{
+          width: 100%;
+        }
+        .rm-with-pagination .rm-page-header{
+          padding-bottom: var(--rm-content-margin-top) !important;
+          padding-top: var(--rm-margin-top) !important;
+          display: inline-flex;
+          justify-content: space-between;
+          max-height: calc(calc(var(--rm-page-height) * 0.45) - var(--rm-margin-top) - var(--rm-content-margin-top));
+          overflow-y: hidden;
+          position: relative;
+        }
+        .rm-with-pagination .rm-page-footer{
+          padding-top: var(--rm-content-margin-bottom) !important;
+          padding-bottom: var(--rm-margin-bottom) !important;
+          display: inline-flex;
+          justify-content: space-between;
+          max-height: calc(calc(var(--rm-page-height) * 0.45) - var(--rm-content-margin-bottom) - var(--rm-margin-bottom));
+          overflow-y: hidden;
+          position: relative;
+        }
+      `;
+      document.head.appendChild(style);
+    }
 
-    const style = document.createElement("style");
-    style.dataset.rmPaginationStyle = "";
-    style.textContent = `
-      .rm-pagination-gap{
-        border-top: 1px solid;
-        border-bottom: 1px solid;
-        border-color: var(--rm-page-gap-border-color);
-      }
-      .rm-with-pagination,
-      .rm-with-pagination .rm-first-page-header {
-        counter-reset: page-number page-number-plus 1;
-      }
-      .rm-with-pagination .image-plus-wrapper,
-      .rm-with-pagination .table-plus td,
-      .rm-with-pagination .table-plus th {
-        max-height: var(--rm-max-content-child-height);
-        overflow-y: auto;
-      }
-      .rm-with-pagination .image-plus-wrapper {
-        overflow-y: visible;
-      }
-      .rm-with-pagination .rm-page-break {
-        counter-increment: page-number page-number-plus;
-      }
-      .rm-with-pagination .rm-page-break:last-child .rm-pagination-gap {
-        display: none;
-      }
-      .rm-with-pagination .rm-page-break:last-child .rm-page-header {
-        display: none;
-      }
-      .rm-with-pagination table tr td,
-      .rm-with-pagination table tr th {
-        word-break: break-all;
-      }
-      .rm-with-pagination table > tr {
-        display: grid;
-        min-width: 100%;
-      }
-      .rm-with-pagination table {
-        border-collapse: collapse;
-        width: 100%;
-        display: contents;
-      }
-      .rm-with-pagination table tbody{
-        display: table;
-        max-height: 300px;
-        overflow-y: auto;
-      }
-      .rm-with-pagination table tbody > tr{
-        display: table-row !important;
-      }
-      .rm-with-pagination *:has(>br.ProseMirror-trailingBreak:only-child) {
-        display: table;
-        width: 100%;
-      }
-      .rm-with-pagination .rm-br-decoration {
-        display: table;
-        width: 100%;
-      }
-      .rm-with-pagination .table-row-group {
-        max-height: var(--rm-max-content-child-height);
-        overflow-y: auto;
-        width: 100%;
-      }
-      .rm-with-pagination .rm-page-footer-left,
-      .rm-with-pagination .rm-page-footer-right,
-      .rm-with-pagination .rm-page-footer-center,
-      .rm-with-pagination .rm-page-header-left,
-      .rm-with-pagination .rm-page-header-right,
-      .rm-with-pagination .rm-page-header-center {
-        display: inline-block;
-      }
-      .rm-with-pagination .rm-page-header-left,
-      .rm-with-pagination .rm-page-footer-left{
-        float: left;
-        margin-left: var(--rm-margin-left);
-      }
-      .rm-with-pagination .rm-page-header-right,
-      .rm-with-pagination .rm-page-footer-right{
-        float: right;
-        margin-right: var(--rm-margin-right);
-      }
-      .rm-with-pagination .rm-page-header-center,
-      .rm-with-pagination .rm-page-footer-center{
-        position: absolute;
-        left: 50%;
-        transform: translateX(-50%);
-      }
-      .rm-with-pagination .rm-first-page-header .rm-page-header-right{
-        margin-right: 0px !important;
-      }
-      .rm-with-pagination .rm-first-page-header .rm-page-header-left{
-        margin-left: 0px !important;
-      }
-      .rm-with-pagination .rm-page-number::before {
-        content: counter(page-number);
-      }
-      .rm-with-pagination .rm-page-number-plus::before {
-        content: counter(page-number-plus);
-      }
-      .rm-with-pagination .rm-page-header,
-      .rm-with-pagination .rm-page-footer{
-        width: 100%;
-      }
-      .rm-with-pagination .rm-page-header{
-        padding-bottom: var(--rm-content-margin-top) !important;
-        padding-top: var(--rm-margin-top) !important;
-        display: inline-flex;
-        justify-content: space-between;
-        max-height: calc(calc(var(--rm-page-height) * 0.45) - var(--rm-margin-top) - var(--rm-content-margin-top));
-        overflow-y: hidden;
-        position: relative;
-      }
-      .rm-with-pagination .rm-page-footer{
-        padding-top: var(--rm-content-margin-bottom) !important;
-        padding-bottom: var(--rm-margin-bottom) !important;
-        display: inline-flex;
-        justify-content: space-between;
-        max-height: calc(calc(var(--rm-page-height) * 0.45) - var(--rm-content-margin-bottom) - var(--rm-margin-bottom));
-        overflow-y: hidden;
-        position: relative;
-      }
-    `;
-    document.head.appendChild(style);
     refreshPage(targetNode);
+    this.storage.initialized = true;
   },
   addProseMirrorPlugins() {
     const editor = this.editor;
@@ -465,7 +501,6 @@ export const PaginationPlus = Extension.create<
         key: paginationKey,
         state: {
           init: (_, state) => {
-            console.log("🔌 PP: Plugin init");
             const widgetList = createDecoration(
               extensionThis.options,
               new Map(),
@@ -477,6 +512,7 @@ export const PaginationPlus = Extension.create<
               headerHeight: new Map(),
               footerHeight: new Map(),
               lastPageCount: 1,
+              initialized: false,
             };
             return {
               decorations: DecorationSet.create(state.doc, widgetList),
@@ -485,19 +521,18 @@ export const PaginationPlus = Extension.create<
           apply: (tr, oldDeco, oldState, newState) => {
             const ppState = getState();
 
-            // If locked, don't change anything
             if (ppState.locked) {
               return oldDeco;
             }
 
             const currentPageCount = getExistingPageCount(editor.view);
-            const pageCount = simpleCalculatePageCount(
-              editor.view.dom,
+            const calculatedPageCount = calculatePageCount(
+              editor.view,
               extensionThis.options
             );
 
-            const needsUpdate =
-              pageCount !== currentPageCount ||
+            // Check if settings changed
+            const settingsChanged =
               extensionThis.storage.pageHeight !==
                 extensionThis.options.pageHeight ||
               extensionThis.storage.pageWidth !==
@@ -505,18 +540,35 @@ export const PaginationPlus = Extension.create<
               extensionThis.storage.marginTop !==
                 extensionThis.options.marginTop ||
               extensionThis.storage.marginBottom !==
-                extensionThis.options.marginBottom;
+                extensionThis.options.marginBottom ||
+              extensionThis.storage.marginLeft !==
+                extensionThis.options.marginLeft ||
+              extensionThis.storage.marginRight !==
+                extensionThis.options.marginRight;
+
+            const needsUpdate =
+              calculatedPageCount !== currentPageCount ||
+              settingsChanged ||
+              !deepEqualIterative(
+                extensionThis.options.customHeader,
+                extensionThis.storage.customHeader
+              ) ||
+              !deepEqualIterative(
+                extensionThis.options.customFooter,
+                extensionThis.storage.customFooter
+              );
 
             if (needsUpdate) {
-              console.log("🔄 PP: Updating decorations", {
-                from: currentPageCount,
-                to: pageCount,
-                reason:
-                  extensionThis.storage.pageHeight !==
-                  extensionThis.options.pageHeight
-                    ? "pageHeight changed"
-                    : "pageCount changed",
-              });
+              ppState.updateCount++;
+
+              if (ppState.updateCount > MAX_UPDATES) {
+                ppState.locked = true;
+                setTimeout(() => {
+                  ppState.locked = false;
+                  ppState.updateCount = 0;
+                }, 1000);
+                return oldDeco;
+              }
 
               updateCssVariables(editor.view.dom, extensionThis.options);
 
@@ -524,14 +576,15 @@ export const PaginationPlus = Extension.create<
                 extensionThis.options,
                 extensionThis.storage.headerHeight || new Map(),
                 extensionThis.storage.footerHeight || new Map(),
-                pageCount
+                calculatedPageCount
               );
 
               extensionThis.storage = {
                 ...extensionThis.options,
                 headerHeight: extensionThis.storage.headerHeight || new Map(),
                 footerHeight: extensionThis.storage.footerHeight || new Map(),
-                lastPageCount: pageCount,
+                lastPageCount: calculatedPageCount,
+                initialized: true,
               };
 
               return {
@@ -548,7 +601,6 @@ export const PaginationPlus = Extension.create<
           },
         },
         view: (editorView: EditorView) => {
-          console.log("👁️ PP: View created");
           return {
             update: (view: EditorView) => {
               const ppState = getState();
@@ -558,19 +610,25 @@ export const PaginationPlus = Extension.create<
               }
 
               const currentPageCount = getExistingPageCount(view);
-              const pageCount = simpleCalculatePageCount(
-                view.dom,
+              const calculatedPageCount = calculatePageCount(
+                view,
                 extensionThis.options
               );
 
-              if (currentPageCount !== pageCount) {
-                console.log("📊 PP: View update - page count mismatch", {
-                  current: currentPageCount,
-                  calculated: pageCount,
-                });
+              if (currentPageCount !== calculatedPageCount) {
+                ppState.updateCount++;
+
+                if (ppState.updateCount > MAX_UPDATES) {
+                  ppState.locked = true;
+                  setTimeout(() => {
+                    ppState.locked = false;
+                    ppState.updateCount = 0;
+                  }, 1000);
+                  return;
+                }
 
                 requestAnimationFrame(() => {
-                  if (!ppState.locked) {
+                  if (!ppState.locked && !view.isDestroyed) {
                     const tr = view.state.tr.setMeta(page_count_meta_key, {});
                     view.dispatch(tr);
                   }
@@ -578,11 +636,107 @@ export const PaginationPlus = Extension.create<
                 return;
               }
 
-              // Reset update count when stable
-              if (ppState.updateCount > 0) {
-                console.log("✅ PP: Stable at", currentPageCount, "pages");
-                ppState.updateCount = 0;
+              // Stable - reset counter
+              ppState.updateCount = 0;
+
+              // Update CSS variables for content heights
+              const headerHeight = getHeaderHeight(
+                view.dom,
+                getCustomPages(extensionThis.options.customHeader, {}),
+                "content"
+              );
+              const footerHeight = getFooterHeight(
+                view.dom,
+                getCustomPages({}, extensionThis.options.customFooter),
+                "content"
+              );
+
+              const pageCount = currentPageCount;
+              const footerHeightForCurrentPages = new Map<PageNumber, number>();
+              for (let i = 0; i <= pageCount; i++) {
+                if (footerHeight.has(i)) {
+                  footerHeightForCurrentPages.set(i, footerHeight.get(i) || 0);
+                }
               }
+
+              const headerHeightForCurrentPages = new Map<PageNumber, number>();
+              for (let i = 0; i <= pageCount; i++) {
+                if (headerHeight.has(i)) {
+                  headerHeightForCurrentPages.set(i, headerHeight.get(i) || 0);
+                }
+              }
+
+              const pagesSetToCheck = new Set([
+                1,
+                ...footerHeightForCurrentPages.keys(),
+                ...headerHeightForCurrentPages.keys(),
+              ]);
+
+              let missingPageNumber: PageNumber | undefined = undefined;
+              for (let i = 1; i <= pageCount; i++) {
+                if (!pagesSetToCheck.has(i)) {
+                  missingPageNumber = i;
+                  break;
+                }
+              }
+
+              if (missingPageNumber) {
+                pagesSetToCheck.add(missingPageNumber);
+              }
+
+              pagesSetToCheck.delete(0);
+              let pageContentHeightVariable: Record<string, string> = {};
+              let maxContentHeight: number | undefined = undefined;
+
+              for (const page of pagesSetToCheck) {
+                const hHeight = headerHeightForCurrentPages.has(page)
+                  ? headerHeightForCurrentPages.get(page) || 0
+                  : headerHeightForCurrentPages.get(0) || 0;
+                const fHeight = footerHeightForCurrentPages.has(page)
+                  ? footerHeightForCurrentPages.get(page) || 0
+                  : footerHeightForCurrentPages.get(0) || 0;
+                const { _pageHeaderHeight, _pageHeight } = getHeight(
+                  extensionThis.options,
+                  hHeight,
+                  fHeight
+                );
+
+                const contentHeight =
+                  page === 1 ? _pageHeight + _pageHeaderHeight : _pageHeight;
+
+                if (page === 1) {
+                  pageContentHeightVariable[
+                    `rm-page-content-first`
+                  ] = `${contentHeight}px`;
+                }
+                if (page === missingPageNumber) {
+                  pageContentHeightVariable[
+                    `rm-page-content-general`
+                  ] = `${contentHeight}px`;
+                } else {
+                  pageContentHeightVariable[
+                    `rm-page-content-${page}`
+                  ] = `${contentHeight}px`;
+                }
+                if (
+                  maxContentHeight === undefined ||
+                  contentHeight < maxContentHeight
+                ) {
+                  maxContentHeight = contentHeight;
+                }
+              }
+
+              if (maxContentHeight) {
+                view.dom.style.setProperty(
+                  `--rm-max-content-child-height`,
+                  `${maxContentHeight - 10}px`
+                );
+              }
+              Object.entries(pageContentHeightVariable).forEach(
+                ([key, value]) => {
+                  view.dom.style.setProperty(`--${key}`, value);
+                }
+              );
 
               refreshPage(view.dom);
             },
@@ -618,7 +772,6 @@ export const PaginationPlus = Extension.create<
         return true;
       },
       updatePageSize: (size: PageSize) => () => {
-        console.log("📐 PP: updatePageSize command", size);
         resetState();
         this.options.pageHeight = size.pageHeight;
         this.options.pageWidth = size.pageWidth;
@@ -715,7 +868,7 @@ export const PaginationPlus = Extension.create<
   },
 });
 
-const getExistingPageCount = (view: EditorView) => {
+const getExistingPageCount = (view: EditorView): number => {
   const editorDom = view.dom;
   const paginationElement = editorDom.querySelector("[data-rm-pagination]");
   if (paginationElement) {
@@ -730,15 +883,8 @@ function createDecoration(
   footerHeightMap: FooterHeightMap,
   pageCount: number
 ): Decoration[] {
-  console.log("🎨 PP: Creating decorations for", pageCount, "pages");
-
-  // HARD CAP
-  const safePageCount = Math.min(pageCount, MAX_PAGES);
-  if (pageCount > MAX_PAGES) {
-    console.warn(
-      `⚠️ PP: createDecoration capping from ${pageCount} to ${safePageCount}`
-    );
-  }
+  // Ensure at least 1 page, max MAX_PAGES
+  const safePageCount = Math.max(1, Math.min(pageCount, MAX_PAGES));
 
   const commonHeaderOptions: HeaderOptions = {
     headerLeft: pageOptions.headerLeft,
@@ -828,32 +974,99 @@ function createDecoration(
 
       const fragment = document.createDocumentFragment();
 
-      // Use safe page count
       for (let i = 0; i < safePageCount; i++) {
         const pageNumber = i + 1;
         const headerPageNumber = i + 2;
 
-        const __pageHeader = getHeader(
-          commonHeaderOptions.headerRight,
-          commonHeaderOptions.headerLeft,
-          commonHeaderOptions.headerCenter || "",
-          headerClickEvent(headerPageNumber, pageOptions.onHeaderClick)
-        );
-        const __pageFooter = getFooter(
-          commonFooterOptions.footerRight,
-          commonFooterOptions.footerLeft,
-          commonFooterOptions.footerCenter || "",
-          footerClickEvent(pageNumber, pageOptions.onFooterClick)
-        );
-        fragment.appendChild(
-          pageBreakDefinition(
-            i === 0,
-            __pageHeader,
-            __pageFooter,
-            _headerHeight,
-            _footerHeight
-          )
-        );
+        if (
+          headerPageNumber in pageOptions.customHeader ||
+          pageNumber in pageOptions.customFooter ||
+          pageNumber in pageOptions.customHeader
+        ) {
+          let _headerOptions: HeaderOptions = { ...commonHeaderOptions };
+          let _footerOptions: FooterOptions = { ...commonFooterOptions };
+
+          let _pageHeaderHeight = _headerHeight;
+          let _pageFooterHeight = _footerHeight;
+
+          if (headerPageNumber in pageOptions.customHeader) {
+            const customHeader = pageOptions.customHeader[headerPageNumber];
+            _headerOptions = {
+              headerLeft:
+                customHeader?.headerLeft || commonHeaderOptions.headerLeft,
+              headerRight:
+                customHeader?.headerRight || commonHeaderOptions.headerRight,
+              headerCenter:
+                customHeader?.headerCenter ||
+                commonHeaderOptions.headerCenter ||
+                "",
+            };
+            _pageHeaderHeight = headerHeightMap.get(headerPageNumber) || 0;
+          }
+
+          if (pageNumber in pageOptions.customFooter) {
+            const customFooter = pageOptions.customFooter[pageNumber];
+            _footerOptions = {
+              footerLeft:
+                customFooter?.footerLeft || commonFooterOptions.footerLeft,
+              footerRight:
+                customFooter?.footerRight || commonFooterOptions.footerRight,
+              footerCenter:
+                customFooter?.footerCenter ||
+                commonFooterOptions.footerCenter ||
+                "",
+            };
+            _pageFooterHeight = footerHeightMap.get(pageNumber) || 0;
+          }
+
+          let _pageHeader = getHeader(
+            _headerOptions.headerRight,
+            _headerOptions.headerLeft,
+            _headerOptions.headerCenter || "",
+            headerClickEvent(headerPageNumber, pageOptions.onHeaderClick),
+            headerPageNumber
+          );
+          let _pageFooter = getFooter(
+            _footerOptions.footerRight,
+            _footerOptions.footerLeft,
+            _footerOptions.footerCenter || "",
+            footerClickEvent(pageNumber, pageOptions.onFooterClick),
+            pageNumber
+          );
+
+          fragment.appendChild(
+            pageBreakDefinition(
+              i === 0,
+              _pageHeader,
+              _pageFooter,
+              _pageHeaderHeight,
+              _pageFooterHeight,
+              pageNumber
+            )
+          );
+        } else {
+          const __pageHeader = getHeader(
+            commonHeaderOptions.headerRight,
+            commonHeaderOptions.headerLeft,
+            commonHeaderOptions.headerCenter || "",
+            headerClickEvent(headerPageNumber, pageOptions.onHeaderClick)
+          );
+          const __pageFooter = getFooter(
+            commonFooterOptions.footerRight,
+            commonFooterOptions.footerLeft,
+            commonFooterOptions.footerCenter || "",
+            footerClickEvent(pageNumber, pageOptions.onFooterClick)
+          );
+          fragment.appendChild(
+            pageBreakDefinition(
+              i === 0,
+              __pageHeader,
+              __pageFooter,
+              _headerHeight,
+              _footerHeight
+            )
+          );
+        }
       }
 
       el.append(fragment);
