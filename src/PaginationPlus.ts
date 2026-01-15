@@ -314,7 +314,7 @@ function calculatePageCount(
     return 1;
   }
 
-  // Calculate pages
+  // Calculate pages based on total content height
   let pagesNeeded = Math.ceil(totalContentHeight / pageContentHeight);
   console.log("🔢 [PP] Initial calculation:", {
     totalContentHeight,
@@ -324,56 +324,13 @@ function calculatePageCount(
 
   pagesNeeded = Math.max(1, Math.min(pagesNeeded, MAX_PAGES));
 
-  // Check overflow with existing pagination
+  // Get current page count for comparison
   const currentPageCount = getExistingPageCount(view);
   console.log("📄 [PP] Current pages in DOM:", currentPageCount);
 
-  const paginationElement = editorDom.querySelector("[data-rm-pagination]");
-
-  if (paginationElement && currentPageCount > 0 && contentElements.length > 0) {
-    const lastPageBreak =
-      paginationElement.lastElementChild?.querySelector(".breaker");
-
-    if (lastPageBreak) {
-      const lastContent = contentElements[contentElements.length - 1];
-      const lastContentRect = lastContent.getBoundingClientRect();
-      const lastBreakRect = lastPageBreak.getBoundingClientRect();
-
-      const overflow = lastContentRect.bottom - lastBreakRect.bottom;
-
-      console.log("📏 [PP] Overflow check:", {
-        lastContentBottom: lastContentRect.bottom,
-        lastBreakBottom: lastBreakRect.bottom,
-        OVERFLOW: overflow,
-      });
-
-      if (overflow > 20) {
-        const additionalPages = Math.ceil(overflow / pageContentHeight);
-        console.log("➕ [PP] Adding pages:", additionalPages);
-        pagesNeeded = Math.min(currentPageCount + additionalPages, MAX_PAGES);
-      } else if (overflow >= -50) {
-        console.log("✅ [PP] Content fits, keeping:", currentPageCount);
-        pagesNeeded = currentPageCount;
-      } else if (
-        overflow < -(pageContentHeight + pageOptions.pageGap) &&
-        currentPageCount > 1
-      ) {
-        const emptySpace = Math.abs(overflow);
-        const emptyPages = Math.floor(
-          emptySpace / (pageContentHeight + pageOptions.pageGap)
-        );
-        console.log("➖ [PP] Empty space:", { emptySpace, emptyPages });
-
-        if (emptyPages >= 2) {
-          pagesNeeded = Math.max(1, currentPageCount - (emptyPages - 1));
-        } else {
-          pagesNeeded = currentPageCount;
-        }
-      } else {
-        pagesNeeded = currentPageCount;
-      }
-    }
-  }
+  // Simple approach: trust the content height calculation
+  // Don't use overflow check because getBoundingClientRect() gives wrong values
+  // when table containers stretch to fill page space
 
   console.log("🎯 [PP] FINAL PAGE COUNT:", pagesNeeded);
   state.pageCount = pagesNeeded;
