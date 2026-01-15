@@ -62,49 +62,73 @@ export interface PaginationPlusStorage extends PaginationPlusOptions {
   headerHeight: HeaderHeightMap;
   footerHeight: FooterHeightMap;
   lastPageCount: number;
-  stablePageCount: number;
-  updateCounter: number;
 }
-
-// ============================================================================
-// STABLE PAGE COUNT TRACKING
-// ============================================================================
-// Store on window to persist across React re-renders and editor recreations
-declare global {
-  interface Window {
-    __paginationState?: {
-      stablePageCount: number;
-      lastDimensions: string;
-      updateCount: number;
-      isStabilizing: boolean;
-    };
-  }
-}
-
-function getPaginationState() {
-  if (!window.__paginationState) {
-    window.__paginationState = {
-      stablePageCount: 1,
-      lastDimensions: "",
-      updateCount: 0,
-      isStabilizing: false,
-    };
-  }
-  return window.__paginationState;
-}
-
-function resetPaginationState() {
-  window.__paginationState = {
-    stablePageCount: 1,
-    lastDimensions: "",
-    updateCount: 0,
-    isStabilizing: false,
-  };
-}
-
-// ============================================================================
 
 const page_count_meta_key = "PAGE_COUNT_META_KEY";
+
+// ============================================================================
+// DEBUG: Global state for tracking
+// ============================================================================
+declare global {
+  interface Window {
+    __paginationDebug?: {
+      callCount: number;
+      lastCalculatedPageCount: number;
+      lastDimensions: { width: number; height: number };
+      history: Array<{
+        timestamp: number;
+        action: string;
+        pageCount: number;
+        details: any;
+      }>;
+    };
+  }
+}
+
+function getDebugState() {
+  if (!window.__paginationDebug) {
+    window.__paginationDebug = {
+      callCount: 0,
+      lastCalculatedPageCount: 1,
+      lastDimensions: { width: 0, height: 0 },
+      history: [],
+    };
+  }
+  return window.__paginationDebug;
+}
+
+function logDebug(action: string, pageCount: number, details: any = {}) {
+  const state = getDebugState();
+  state.callCount++;
+  state.history.push({
+    timestamp: Date.now(),
+    action,
+    pageCount,
+    details,
+  });
+
+  // Keep only last 50 entries
+  if (state.history.length > 50) {
+    state.history.shift();
+  }
+
+  console.log(`🔍 [${state.callCount}] ${action}:`, {
+    pageCount,
+    ...details,
+  });
+}
+
+function resetDebugState() {
+  window.__paginationDebug = {
+    callCount: 0,
+    lastCalculatedPageCount: 1,
+    lastDimensions: { width: 0, height: 0 },
+    history: [],
+  };
+  console.log("🔄 Debug state reset");
+}
+
+// ============================================================================
 
 declare module "@tiptap/core" {
   interface Commands<ReturnType> {
@@ -201,100 +225,135 @@ const refreshPage = (targetNode: HTMLElement) => {
 const paginationKey = new PluginKey("pagination");
 
 // ============================================================================
-// SIMPLE, STABLE PAGE COUNT CALCULATION
+// DEBUG VERSION: calculatePageCount with extensive logging
 // ============================================================================
-// This function calculates page count based on actual content overflow
-// It only ADDS pages, never removes them in a single update cycle
-// This prevents the feedback loop where removing pages causes content to overflow
-// which causes pages to be added, which causes content to fit, which causes pages
-// to be removed...
-
-function calculateStablePageCount(
+const calculatePageCount = (
   view: EditorView,
   pageOptions: PaginationPlusOptions,
-  currentPageCount: number
-): number {
-  const state = getPaginationState();
-
-  // Increment update counter
-  state.updateCount++;
-
-  // Safety limit - if we've updated too many times, just use current count
-  if (state.updateCount > 20) {
-    console.warn("PaginationPlus: Stabilizing at", currentPageCount, "pages");
-    state.isStabilizing = true;
-    return currentPageCount;
-  }
-
+  headerHeight: number = 0,
+  footerHeight: number = 0
+) => {
+  const debugState = getDebugState();
   const editorDom = view.dom;
 
-  // Calculate content area per page
-  const headerFooterHeight =
-    pageOptions.marginTop +
-    pageOptions.marginBottom +
-    pageOptions.contentMarginTop +
-    pageOptions.contentMarginBottom;
-  const pageContentHeight = pageOptions.pageHeight - headerFooterHeight;
+  // Calculate page content area
+  const _pageHeaderHeight =
+    pageOptions.contentMarginTop + pageOptions.marginTop + headerHeight;
+  const _pageFooterHeight =
+    pageOptions.contentMarginBottom + pageOptions.marginBottom + footerHeight;
+  const pageContentAreaHeight =
+    pageOptions.pageHeight - _pageHeaderHeight - _pageFooterHeight;
 
-  if (pageContentHeight <= 50) {
-    console.warn("PaginationPlus: Page content area too small");
+  logDebug("calculatePageCount START", 0, {
+    pageHeight: pageOptions.pageHeight,
+    pageWidth: pageOptions.pageWidth,
+    _pageHeaderHeight,
+    _pageFooterHeight,
+    pageContentAreaHeight,
+    marginTop: pageOptions.marginTop,
+    marginBottom: pageOptions.marginBottom,
+  });
+
+  if (pageContentAreaHeight <= 50) {
+    console.error("❌ Page content area too small:", pageContentAreaHeight);
     return 1;
   }
 
   const paginationElement = editorDom.querySelector("[data-rm-pagination]");
+  const currentPageCount = paginationElement
+    ? paginationElement.children.length
+    : 0;
 
-  if (!paginationElement) {
-    // No pagination element yet - estimate based on scroll height
-    const editorHeight = editorDom.scrollHeight;
-    const estimated = Math.max(1, Math.ceil(editorHeight / pageContentHeight));
-    return estimated;
-  }
+  logDebug("Current state", currentPageCount, {
+    hasPaginationElement: !!paginationElement,
+    currentPageCount,
+  });
 
-  // Check if content overflows the last page
-  const lastPageBreak =
-    paginationElement.lastElementChild?.querySelector(".breaker");
-  if (!lastPageBreak) {
-    return currentPageCount;
-  }
+  if (paginationElement) {
+    const lastElementOfEditor = editorDom.lastElementChild;
+    const lastPageBreak =
+      paginationElement.lastElementChild?.querySelector(".breaker");
 
-  const lastElementOfEditor = editorDom.lastElementChild;
-  if (!lastElementOfEditor || lastElementOfEditor === paginationElement) {
-    return currentPageCount;
-  }
+    if (lastElementOfEditor && lastPageBreak) {
+      const lastElementRect = lastElementOfEditor.getBoundingClientRect();
+      const lastPageBreakRect = lastPageBreak.getBoundingClientRect();
+      const lastPageGap = lastElementRect.bottom - lastPageBreakRect.bottom;
 
-  const lastElementRect = lastElementOfEditor.getBoundingClientRect();
-  const lastPageBreakRect = lastPageBreak.getBoundingClientRect();
+      logDebug("Measuring overflow", currentPageCount, {
+        lastElementBottom: lastElementRect.bottom,
+        lastPageBreakBottom: lastPageBreakRect.bottom,
+        lastPageGap,
+        editorScrollHeight: editorDom.scrollHeight,
+        editorClientHeight: editorDom.clientHeight,
+      });
 
-  // How much content extends beyond the last page break?
-  const overflow = lastElementRect.bottom - lastPageBreakRect.bottom;
+      if (lastPageGap > 0) {
+        // Content overflows - need more pages
+        const addPage = Math.ceil(lastPageGap / pageContentAreaHeight);
+        const newPageCount = currentPageCount + addPage;
 
-  if (overflow > 10) {
-    // Content overflows - need more pages
-    const additionalPages = Math.ceil(overflow / pageContentHeight);
-    const newCount = currentPageCount + additionalPages;
-    console.log(
-      `📄 Adding ${additionalPages} page(s): ${currentPageCount} → ${newCount}`
-    );
-    return newCount;
-  } else if (overflow < -pageContentHeight && currentPageCount > 1) {
-    // Content fits with room to spare - CAREFULLY remove pages
-    // Only remove if we have significant empty space (more than one full page)
-    const emptySpace = Math.abs(overflow);
-    const pagesToRemove =
-      Math.floor(emptySpace / (pageContentHeight + pageOptions.pageGap)) - 1;
+        logDebug("OVERFLOW - Adding pages", newPageCount, {
+          overflow: lastPageGap,
+          addPage,
+          calculation: `${currentPageCount} + ${addPage} = ${newPageCount}`,
+        });
 
-    if (pagesToRemove > 0) {
-      const newCount = Math.max(1, currentPageCount - pagesToRemove);
-      console.log(
-        `📄 Removing ${pagesToRemove} page(s): ${currentPageCount} → ${newCount}`
-      );
-      return newCount;
+        return newPageCount;
+      } else {
+        // Content fits or has extra space
+        const lpFrom = -10;
+        const lpTo = -(pageOptions.pageHeight - 10);
+
+        logDebug("Content fits check", currentPageCount, {
+          lastPageGap,
+          lpFrom,
+          lpTo,
+          inRange: lastPageGap > lpTo && lastPageGap < lpFrom,
+          shouldRemove: lastPageGap < lpTo,
+        });
+
+        if (lastPageGap > lpTo && lastPageGap < lpFrom) {
+          // Content fits properly
+          logDebug("STABLE - Content fits", currentPageCount, {});
+          return currentPageCount;
+        } else if (lastPageGap < lpTo) {
+          // Too much empty space - remove pages
+          const pageHeightOnRemove =
+            pageOptions.pageHeight + pageOptions.pageGap;
+          const removePage = Math.floor(lastPageGap / pageHeightOnRemove);
+          const newPageCount = Math.max(1, currentPageCount + removePage);
+
+          logDebug("EXCESS SPACE - Removing pages", newPageCount, {
+            emptySpace: Math.abs(lastPageGap),
+            removePage,
+            calculation: `${currentPageCount} + ${removePage} = ${newPageCount}`,
+          });
+
+          return newPageCount;
+        } else {
+          logDebug("STABLE - Within tolerance", currentPageCount, {});
+          return currentPageCount;
+        }
+      }
     }
-  }
 
-  // Content fits properly
-  return currentPageCount;
-}
+    logDebug("No last element or page break", 1, {});
+    return 1;
+  } else {
+    // No pagination element yet - estimate
+    const editorHeight = editorDom.scrollHeight;
+    let pageCount = Math.ceil(editorHeight / pageContentAreaHeight);
+    pageCount = pageCount <= 0 ? 1 : pageCount;
+
+    logDebug("INITIAL - No pagination element", pageCount, {
+      editorHeight,
+      pageContentAreaHeight,
+      calculation: `ceil(${editorHeight} / ${pageContentAreaHeight}) = ${pageCount}`,
+    });
+
+    return pageCount;
+  }
+};
 
 // ============================================================================
 
@@ -311,12 +370,13 @@ export const PaginationPlus = Extension.create<
       ...defaultOptions,
       headerHeight: new Map(),
       footerHeight: new Map(),
-      lastPageCount: 1,
-      stablePageCount: 1,
-      updateCounter: 0,
+      lastPageCount: 0,
     };
   },
   onCreate() {
+    console.log("🚀 PaginationPlus onCreate called");
+    resetDebugState();
+
     const targetNode = this.editor.view.dom;
     targetNode.classList.add("rm-with-pagination");
     targetNode.style.border = `1px solid var(--rm-page-gap-border-color)`;
@@ -326,8 +386,10 @@ export const PaginationPlus = Extension.create<
 
     updateCssVariables(targetNode, this.options);
 
-    // Reset state when editor is created
-    resetPaginationState();
+    logDebug("onCreate", 0, {
+      pageWidth: this.options.pageWidth,
+      pageHeight: this.options.pageHeight,
+    });
 
     const style = document.createElement("style");
     style.dataset.rmPaginationStyle = "";
@@ -469,19 +531,18 @@ export const PaginationPlus = Extension.create<
 
         state: {
           init: (_, state) => {
+            logDebug("Plugin state init", 1, {});
+
             const widgetList = createDecoration(
               extensionThis.options,
               new Map(),
-              new Map(),
-              1 // Start with 1 page
+              new Map()
             );
             extensionThis.storage = {
               ...extensionThis.options,
               headerHeight: new Map(),
               footerHeight: new Map(),
-              lastPageCount: 1,
-              stablePageCount: 1,
-              updateCounter: 0,
+              lastPageCount: 0,
             };
 
             return {
@@ -489,16 +550,22 @@ export const PaginationPlus = Extension.create<
             };
           },
           apply: (tr, oldDeco, oldState, newState) => {
-            const state = getPaginationState();
+            const pageCount = calculatePageCount(
+              editor.view,
+              extensionThis.options
+            );
+            const currentPageCount = getExistingPageCount(editor.view);
 
-            // If stabilizing, don't update decorations
-            if (state.isStabilizing) {
-              return oldDeco;
-            }
+            logDebug("Plugin state apply", pageCount, {
+              calculatedPageCount: pageCount,
+              currentPageCount,
+              docChanged: tr.docChanged,
+              settingsChanged:
+                extensionThis.storage.pageHeight !==
+                extensionThis.options.pageHeight,
+            });
 
-            const currentPageCount = extensionThis.storage.stablePageCount || 1;
-
-            const getNewDecoration = (pageCount: number) => {
+            const getNewDecoration = () => {
               updateCssVariables(editor.view.dom, extensionThis.options);
               let headerHeight =
                 "headerHeight" in extensionThis.storage
@@ -512,16 +579,13 @@ export const PaginationPlus = Extension.create<
               const widgetList = createDecoration(
                 extensionThis.options,
                 headerHeight,
-                footerHeight,
-                pageCount
+                footerHeight
               );
               extensionThis.storage = {
                 ...extensionThis.options,
                 headerHeight,
                 footerHeight,
-                lastPageCount: pageCount,
-                stablePageCount: pageCount,
-                updateCounter: extensionThis.storage.updateCounter + 1,
+                lastPageCount: extensionThis.storage.lastPageCount,
               };
               return {
                 decorations: DecorationSet.create(newState.doc, [
@@ -531,8 +595,8 @@ export const PaginationPlus = Extension.create<
               };
             };
 
-            // Check if settings changed
-            const settingsChanged =
+            if (
+              (pageCount > 1 ? pageCount : 1) !== currentPageCount ||
               extensionThis.storage.pageBreakBackground !==
                 extensionThis.options.pageBreakBackground ||
               extensionThis.storage.pageHeight !==
@@ -571,22 +635,18 @@ export const PaginationPlus = Extension.create<
               !deepEqualIterative(
                 extensionThis.options.customFooter,
                 extensionThis.storage.customFooter
-              );
-
-            // If dimensions changed, reset state and recalculate
-            if (
-              extensionThis.storage.pageHeight !==
-                extensionThis.options.pageHeight ||
-              extensionThis.storage.pageWidth !==
-                extensionThis.options.pageWidth
+              )
             ) {
-              console.log("📐 Dimensions changed, resetting pagination state");
-              resetPaginationState();
-              extensionThis.storage.stablePageCount = 1;
-            }
-
-            if (settingsChanged || tr.docChanged) {
-              return getNewDecoration(currentPageCount);
+              logDebug("Triggering decoration update", pageCount, {
+                reason:
+                  extensionThis.storage.pageHeight !==
+                  extensionThis.options.pageHeight
+                    ? "pageHeight changed"
+                    : pageCount !== currentPageCount
+                    ? "pageCount changed"
+                    : "other",
+              });
+              return getNewDecoration();
             }
 
             return oldDeco;
@@ -599,54 +659,50 @@ export const PaginationPlus = Extension.create<
           },
         },
         view: (editorView: EditorView) => {
-          console.log("🔄 VIEW CREATED");
-          resetPaginationState();
+          logDebug("View created", 0, {});
 
           return {
             update: (view: EditorView) => {
-              const state = getPaginationState();
+              const debugState = getDebugState();
 
-              // If already stabilizing, do nothing
-              if (state.isStabilizing) {
+              // SAFETY: Stop after 50 iterations
+              if (debugState.callCount > 50) {
+                console.error("🛑 MAX ITERATIONS (50) REACHED - STOPPING");
+                console.log("📊 Debug history:", debugState.history.slice(-10));
                 return;
               }
 
+              const pageCount = calculatePageCount(view, extensionThis.options);
               const currentPageCount = getExistingPageCount(view);
-              const targetPageCount = calculateStablePageCount(
-                view,
-                extensionThis.options,
-                currentPageCount
-              );
 
-              // If page count changed, trigger update
-              if (
-                currentPageCount !== targetPageCount &&
-                !state.isStabilizing
-              ) {
-                extensionThis.storage.stablePageCount = targetPageCount;
+              logDebug("View update", pageCount, {
+                pageCount,
+                currentPageCount,
+                needsUpdate: currentPageCount !== pageCount,
+              });
 
+              const triggerUpdate = (_footerHeight?: FooterHeightMap) => {
+                logDebug("Dispatching transaction", pageCount, {});
                 requestAnimationFrame(() => {
-                  if (!state.isStabilizing) {
-                    const tr = view.state.tr.setMeta(page_count_meta_key, {});
-                    view.dispatch(tr);
-                  }
+                  const tr = view.state.tr.setMeta(page_count_meta_key, {
+                    footerHeight: _footerHeight,
+                  });
+                  view.dispatch(tr);
                 });
+              };
+
+              if (currentPageCount !== pageCount) {
+                logDebug("Page count mismatch - triggering update", pageCount, {
+                  current: currentPageCount,
+                  target: pageCount,
+                });
+                triggerUpdate();
                 return;
               }
 
-              // Stable - reset update counter
-              if (state.updateCount > 0) {
-                console.log(
-                  "✅ Stable at",
-                  currentPageCount,
-                  "pages after",
-                  state.updateCount,
-                  "updates"
-                );
-              }
-              state.updateCount = 0;
+              // Stable - log and continue
+              logDebug("STABLE", currentPageCount, {});
 
-              // Update CSS variables for page content heights
               const headerHeight = getHeaderHeight(
                 view.dom,
                 getCustomPages(extensionThis.options.customHeader, {}),
@@ -658,7 +714,7 @@ export const PaginationPlus = Extension.create<
                 "content"
               );
 
-              const pageCount = currentPageCount;
+              // ... rest of the update logic
               const footerHeightForCurrentPages = new Map<PageNumber, number>();
               for (let i = 0; i <= pageCount; i++) {
                 if (footerHeight.has(i)) {
@@ -759,9 +815,6 @@ export const PaginationPlus = Extension.create<
           },
 
           apply(tr, old) {
-            const state = getPaginationState();
-            if (state.isStabilizing) return old;
-
             if (
               tr.docChanged ||
               tr.steps.some((step) => step instanceof ReplaceStep) ||
@@ -788,13 +841,12 @@ export const PaginationPlus = Extension.create<
   addCommands() {
     return {
       updatePageBreakBackground: (color: string) => () => {
-        resetPaginationState();
         this.options.pageBreakBackground = color;
         return true;
       },
       updatePageSize: (size: PageSize) => () => {
-        console.log("📐 updatePageSize command called:", size);
-        resetPaginationState();
+        console.log("📐 updatePageSize command:", size);
+        resetDebugState();
         this.options.pageHeight = size.pageHeight;
         this.options.pageWidth = size.pageWidth;
         this.options.marginTop = size.marginTop;
@@ -804,17 +856,16 @@ export const PaginationPlus = Extension.create<
         return true;
       },
       updatePageWidth: (width: number) => () => {
-        resetPaginationState();
+        resetDebugState();
         this.options.pageWidth = width;
         return true;
       },
       updatePageHeight: (height: number) => () => {
-        resetPaginationState();
+        resetDebugState();
         this.options.pageHeight = height;
         return true;
       },
       updatePageGap: (gap: number) => () => {
-        resetPaginationState();
         this.options.pageGap = gap;
         return true;
       },
@@ -826,7 +877,6 @@ export const PaginationPlus = Extension.create<
           right: number;
         }) =>
         () => {
-          resetPaginationState();
           this.options.marginTop = margins.top;
           this.options.marginBottom = margins.bottom;
           this.options.marginLeft = margins.left;
@@ -835,7 +885,6 @@ export const PaginationPlus = Extension.create<
         },
       updateContentMargins:
         (margins: { top: number; bottom: number }) => () => {
-          resetPaginationState();
           this.options.contentMarginTop = margins.top;
           this.options.contentMarginBottom = margins.bottom;
           return true;
@@ -898,14 +947,13 @@ const getExistingPageCount = (view: EditorView) => {
   if (paginationElement) {
     return paginationElement.children.length;
   }
-  return 1;
+  return 0;
 };
 
 function createDecoration(
   pageOptions: PaginationPlusOptions,
   headerHeightMap: HeaderHeightMap,
-  footerHeightMap: FooterHeightMap,
-  pageCount: number = 1
+  footerHeightMap: FooterHeightMap
 ): Decoration[] {
   const commonHeaderOptions: HeaderOptions = {
     headerLeft: pageOptions.headerLeft,
@@ -995,13 +1043,16 @@ function createDecoration(
 
       const fragment = document.createDocumentFragment();
 
-      // Use the pageCount passed to this function
-      const state = getPaginationState();
-      const actualPageCount = state.stablePageCount || pageCount || 1;
+      // Calculate page count HERE in the widget
+      const pageCount = calculatePageCount(view, pageOptions);
 
-      console.log("🎨 Creating", actualPageCount, "page(s)");
+      logDebug("createDecoration - building pages", pageCount, {
+        pageCount,
+        pageHeight: pageOptions.pageHeight,
+        pageWidth: pageOptions.pageWidth,
+      });
 
-      for (let i = 0; i < actualPageCount; i++) {
+      for (let i = 0; i < pageCount; i++) {
         const pageNumber = i + 1;
         const headerPageNumber = i + 2;
         if (
