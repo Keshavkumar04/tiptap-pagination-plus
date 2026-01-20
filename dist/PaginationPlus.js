@@ -283,7 +283,6 @@ export const PaginationPlus = Extension.create({
         resetState();
         const targetNode = this.editor.view.dom;
         targetNode.classList.add("rm-with-pagination");
-        targetNode.style.border = `1px solid var(--rm-page-gap-border-color)`;
         targetNode.style.paddingLeft = `var(--rm-margin-left)`;
         targetNode.style.paddingRight = `var(--rm-margin-right)`;
         targetNode.style.width = `var(--rm-page-width)`;
