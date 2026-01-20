@@ -153,13 +153,13 @@ declare module "@tiptap/core" {
         left: string,
         right: string,
         center?: string,
-        pageNumber?: PageNumber
+        pageNumber?: PageNumber,
       ) => ReturnType;
       updateFooterContent: (
         left: string,
         right: string,
         center?: string,
-        pageNumber?: PageNumber
+        pageNumber?: PageNumber,
       ) => ReturnType;
       // NEW: Command to handle orientation change
       prepareForOrientationChange: () => ReturnType;
@@ -215,7 +215,7 @@ const refreshPage = (targetNode: HTMLElement) => {
   const paginationElement = targetNode.querySelector("[data-rm-pagination]");
   if (paginationElement) {
     const lastPageBreak = paginationElement.lastElementChild?.querySelector(
-      ".breaker"
+      ".breaker",
     ) as HTMLElement;
     if (lastPageBreak) {
       const minHeight = lastPageBreak.offsetTop + lastPageBreak.offsetHeight;
@@ -302,7 +302,7 @@ function calculatePageCount(
   view: EditorView,
   pageOptions: PaginationPlusOptions,
   headerHeight: number = 0,
-  footerHeight: number = 0
+  footerHeight: number = 0,
 ): number {
   const state = getState();
   const now = Date.now();
@@ -479,28 +479,143 @@ export const PaginationPlus = Extension.create<
     if (!existingStyle) {
       const style = document.createElement("style");
       style.dataset.rmPaginationStyle = "";
+      // =========================================================================
+      // UPDATED CSS - FIXED TABLE STYLES AND REMOVED UNNECESSARY BORDERS
+      // =========================================================================
       style.textContent = `
-        .rm-pagination-gap{border-top:1px solid;border-bottom:1px solid;border-color:var(--rm-page-gap-border-color)}
-        .rm-with-pagination,.rm-with-pagination .rm-first-page-header{counter-reset:page-number page-number-plus 1}
-        .rm-with-pagination .rm-page-break{counter-increment:page-number page-number-plus}
-        .rm-with-pagination .rm-page-break:last-child .rm-pagination-gap{display:none}
-        .rm-with-pagination .rm-page-break:last-child .rm-page-header{display:none}
-        .rm-with-pagination table{border-collapse:collapse;width:100%;display:contents}
-        .rm-with-pagination table tbody{display:table;max-height:300px;overflow-y:auto}
-        .rm-with-pagination table tbody>tr{display:table-row!important}
-        .rm-with-pagination *:has(>br.ProseMirror-trailingBreak:only-child){display:table;width:100%}
-        .rm-with-pagination .rm-br-decoration{display:table;width:100%}
-        .rm-with-pagination .rm-page-footer-left,.rm-with-pagination .rm-page-footer-right,.rm-with-pagination .rm-page-footer-center,.rm-with-pagination .rm-page-header-left,.rm-with-pagination .rm-page-header-right,.rm-with-pagination .rm-page-header-center{display:inline-block}
-        .rm-with-pagination .rm-page-header-left,.rm-with-pagination .rm-page-footer-left{float:left;margin-left:var(--rm-margin-left)}
-        .rm-with-pagination .rm-page-header-right,.rm-with-pagination .rm-page-footer-right{float:right;margin-right:var(--rm-margin-right)}
-        .rm-with-pagination .rm-page-header-center,.rm-with-pagination .rm-page-footer-center{position:absolute;left:50%;transform:translateX(-50%)}
-        .rm-with-pagination .rm-first-page-header .rm-page-header-right{margin-right:0!important}
-        .rm-with-pagination .rm-first-page-header .rm-page-header-left{margin-left:0!important}
-        .rm-with-pagination .rm-page-number::before{content:counter(page-number)}
-        .rm-with-pagination .rm-page-number-plus::before{content:counter(page-number-plus)}
-        .rm-with-pagination .rm-page-header,.rm-with-pagination .rm-page-footer{width:100%}
-        .rm-with-pagination .rm-page-header{padding-bottom:var(--rm-content-margin-top)!important;padding-top:var(--rm-margin-top)!important;display:inline-flex;justify-content:space-between;position:relative}
-        .rm-with-pagination .rm-page-footer{padding-top:var(--rm-content-margin-bottom)!important;padding-bottom:var(--rm-margin-bottom)!important;display:inline-flex;justify-content:space-between;position:relative}
+        /* Page gap - REMOVED border-top and border-bottom for cleaner look */
+        .rm-pagination-gap {
+          border-left: 1px solid var(--rm-page-gap-border-color);
+          border-right: 1px solid var(--rm-page-gap-border-color);
+        }
+        
+        /* Counter resets */
+        .rm-with-pagination,
+        .rm-with-pagination .rm-first-page-header {
+          counter-reset: page-number page-number-plus 1;
+        }
+        
+        .rm-with-pagination .rm-page-break {
+          counter-increment: page-number page-number-plus;
+        }
+        
+        .rm-with-pagination .rm-page-break:last-child .rm-pagination-gap {
+          display: none;
+        }
+        
+        .rm-with-pagination .rm-page-break:last-child .rm-page-header {
+          display: none;
+        }
+        
+        /* ====== FIXED TABLE STYLES ====== */
+        /* REMOVED display:contents - tables now render properly */
+        .rm-with-pagination table {
+          border-collapse: collapse;
+          width: 100%;
+          display: table; /* Changed from display:contents */
+          table-layout: auto;
+        }
+        
+        .rm-with-pagination table tbody {
+          display: table-row-group; /* Changed from display:table */
+        }
+        
+        .rm-with-pagination table tbody > tr {
+          display: table-row !important;
+        }
+        
+        .rm-with-pagination table td,
+        .rm-with-pagination table th {
+          display: table-cell;
+        }
+        
+        /* Preserve table wrapper styles */
+        .rm-with-pagination .tableWrapper {
+          display: block;
+          width: 100%;
+          overflow-x: auto;
+        }
+        /* ====== END TABLE STYLES ====== */
+        
+        .rm-with-pagination *:has(> br.ProseMirror-trailingBreak:only-child) {
+          display: table;
+          width: 100%;
+        }
+        
+        .rm-with-pagination .rm-br-decoration {
+          display: table;
+          width: 100%;
+        }
+        
+        /* Header/Footer positioning */
+        .rm-with-pagination .rm-page-footer-left,
+        .rm-with-pagination .rm-page-footer-right,
+        .rm-with-pagination .rm-page-footer-center,
+        .rm-with-pagination .rm-page-header-left,
+        .rm-with-pagination .rm-page-header-right,
+        .rm-with-pagination .rm-page-header-center {
+          display: inline-block;
+        }
+        
+        .rm-with-pagination .rm-page-header-left,
+        .rm-with-pagination .rm-page-footer-left {
+          float: left;
+          margin-left: var(--rm-margin-left);
+        }
+        
+        .rm-with-pagination .rm-page-header-right,
+        .rm-with-pagination .rm-page-footer-right {
+          float: right;
+          margin-right: var(--rm-margin-right);
+        }
+        
+        .rm-with-pagination .rm-page-header-center,
+        .rm-with-pagination .rm-page-footer-center {
+          position: absolute;
+          left: 50%;
+          transform: translateX(-50%);
+        }
+        
+        .rm-with-pagination .rm-first-page-header .rm-page-header-right {
+          margin-right: 0 !important;
+        }
+        
+        .rm-with-pagination .rm-first-page-header .rm-page-header-left {
+          margin-left: 0 !important;
+        }
+        
+        /* Page number counters */
+        .rm-with-pagination .rm-page-number::before {
+          content: counter(page-number);
+        }
+        
+        .rm-with-pagination .rm-page-number-plus::before {
+          content: counter(page-number-plus);
+        }
+        
+        /* Header and Footer base styles - REMOVED borders */
+        .rm-with-pagination .rm-page-header,
+        .rm-with-pagination .rm-page-footer {
+          width: 100%;
+        }
+        
+        .rm-with-pagination .rm-page-header {
+          padding-bottom: var(--rm-content-margin-top) !important;
+          padding-top: var(--rm-margin-top) !important;
+          display: inline-flex;
+          justify-content: space-between;
+          position: relative;
+          /* REMOVED: border-bottom that was causing the line */
+        }
+        
+        .rm-with-pagination .rm-page-footer {
+          padding-top: var(--rm-content-margin-bottom) !important;
+          padding-bottom: var(--rm-margin-bottom) !important;
+          display: inline-flex;
+          justify-content: space-between;
+          position: relative;
+          /* REMOVED: border-top that was causing the line */
+        }
       `;
       document.head.appendChild(style);
     }
@@ -530,7 +645,7 @@ export const PaginationPlus = Extension.create<
               extensionThis.options,
               new Map(),
               new Map(),
-              1
+              1,
             );
             extensionThis.storage = {
               ...extensionThis.options,
@@ -552,7 +667,7 @@ export const PaginationPlus = Extension.create<
             const currentPageCount = getExistingPageCount(editor.view);
             const calculatedPageCount = calculatePageCount(
               editor.view,
-              extensionThis.options
+              extensionThis.options,
             );
 
             const settingsChanged =
@@ -567,12 +682,12 @@ export const PaginationPlus = Extension.create<
             if (needsUpdate) {
               ppState.updateCount++;
               console.log(
-                `🔄 [PP] Update #${ppState.updateCount}: ${currentPageCount} → ${calculatedPageCount}`
+                `🔄 [PP] Update #${ppState.updateCount}: ${currentPageCount} → ${calculatedPageCount}`,
               );
 
               if (ppState.updateCount > MAX_UPDATES) {
                 console.warn(
-                  `⛔ [PP] LOCKED at ${calculatedPageCount} pages after ${MAX_UPDATES} updates`
+                  `⛔ [PP] LOCKED at ${calculatedPageCount} pages after ${MAX_UPDATES} updates`,
                 );
                 ppState.locked = true;
                 ppState.stableContentHeight = null; // Reset stable height
@@ -590,7 +705,7 @@ export const PaginationPlus = Extension.create<
                 extensionThis.options,
                 extensionThis.storage.headerHeight || new Map(),
                 extensionThis.storage.footerHeight || new Map(),
-                calculatedPageCount
+                calculatedPageCount,
               );
 
               extensionThis.storage = {
@@ -622,7 +737,7 @@ export const PaginationPlus = Extension.create<
             const currentPageCount = getExistingPageCount(view);
             const calculatedPageCount = calculatePageCount(
               view,
-              extensionThis.options
+              extensionThis.options,
             );
 
             if (currentPageCount !== calculatedPageCount) {
@@ -751,7 +866,7 @@ export const PaginationPlus = Extension.create<
           left: string,
           right: string,
           center?: string,
-          pageNumber?: PageNumber
+          pageNumber?: PageNumber,
         ) =>
         () => {
           if (pageNumber) {
@@ -775,7 +890,7 @@ export const PaginationPlus = Extension.create<
           left: string,
           right: string,
           center?: string,
-          pageNumber?: PageNumber
+          pageNumber?: PageNumber,
         ) =>
         () => {
           if (pageNumber) {
@@ -812,7 +927,7 @@ function createDecoration(
   pageOptions: PaginationPlusOptions,
   headerHeightMap: HeaderHeightMap,
   footerHeightMap: FooterHeightMap,
-  pageCount: number
+  pageCount: number,
 ): Decoration[] {
   const safePageCount = Math.max(1, Math.min(pageCount, MAX_PAGES));
   console.log(`🎨 [PP] Creating ${safePageCount} page decorations`);
@@ -843,7 +958,7 @@ function createDecoration(
         const { _pageHeaderHeight, _pageHeight } = getHeight(
           pageOptions,
           _headerHeight,
-          _footerHeight
+          _footerHeight,
         );
 
         const pageContainer = document.createElement("div");
@@ -887,13 +1002,13 @@ function createDecoration(
           commonHeaderOptions.headerRight,
           commonHeaderOptions.headerLeft,
           commonHeaderOptions.headerCenter || "",
-          () => {}
+          () => {},
         );
         const pageFooter = getFooter(
           commonFooterOptions.footerRight,
           commonFooterOptions.footerLeft,
           commonFooterOptions.footerCenter || "",
-          () => {}
+          () => {},
         );
 
         pageBreak.append(pageFooter, pageSpace, pageHeader);
@@ -907,7 +1022,7 @@ function createDecoration(
 
       return el;
     },
-    { side: -1 }
+    { side: -1 },
   );
 
   const firstHeaderWidget = Decoration.widget(
@@ -917,12 +1032,12 @@ function createDecoration(
         commonHeaderOptions.headerRight,
         commonHeaderOptions.headerLeft,
         commonHeaderOptions.headerCenter || "",
-        () => {}
+        () => {},
       );
       el.classList.add("rm-first-page-header");
       return el;
     },
-    { side: -1 }
+    { side: -1 },
   );
 
   return [pageWidget, firstHeaderWidget];
